@@ -7,10 +7,13 @@ A production-hardened, pure-Zig implementation of the AMQP 0-9-1 specification w
 - **Pure Zig (0.17+)**: Zero external C dependencies. Uses native Zig networking and cryptography.
 - **Publisher Confirms (`Confirm.Select`)**: Reliable message publishing with sequence tracking (`delivery_tag`) and broker ACK/NACK verification.
 - **Consumer Engine & Multi-Frame Reassembly**: Streaming reassembly of `Basic.Deliver` + Content Header + multi-chunk Body frames up to negotiated `frame_max`.
+- **Polling Consumption (`Basic.Get`)**: Polling retrieval for batch workers and task queues via `ch.get(allocator, queue, no_ack)`.
 - **Zero Heap Overhead Framing**: Caller-provided slices and bounded stack buffers for method serialization and framing codecs.
 - **Resilient Reconnection**: Exponential backoff reconnect state machine with automated topology recovery (exchanges, queues, bindings, and consumer subscriptions).
 - **Transport Security (TLS)**: Native support for plain TCP (`amqp://`) and TLS encrypted transport (`amqps://`).
-- **Heartbeat Watchdog**: Automatic heartbeat emission and missed-heartbeat dead peer detection.
+- **Autonomous Heartbeat Worker**: Background heartbeat thread with thread-safe framing mutex preventing connection drops during idle periods.
+- **AMQP URI Parser**: Built-in parsing for standard RFC 3986 connection URIs (`amqp://` and `amqps://`) with credentials and vhost percent-decoding.
+- **RabbitMQ Queue Argument Tables**: Full support for `x-dead-letter-exchange`, `x-message-ttl`, `x-max-length`, and header exchange routing.
 
 ---
 
@@ -176,4 +179,4 @@ Run the full unit and integration test suite:
 zig build test --summary all
 ```
 
-All 23 tests execute with 100% pass rate, zero memory leaks, and verify protocol framing, tables, TLS transport, publisher confirms, consumer frame reassembly, and live RabbitMQ handshakes.
+All 27 tests execute with 100% pass rate, zero memory leaks, and verify protocol framing, table codecs, TLS transport, publisher confirms, consumer frame reassembly, URI parsing, background heartbeats, queue arguments, and live RabbitMQ handshakes.

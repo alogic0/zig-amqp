@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
             .name = name,
             .root_module = exe_mod,
         });
+        b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
         const run_step = b.step(b.fmt("run-{s}", .{name}), b.fmt("Run the {s} example", .{name}));
