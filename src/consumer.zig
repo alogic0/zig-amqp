@@ -15,6 +15,7 @@ pub const Error = error{
     BufferTooSmall,
     ChannelClosed,
     ConnectionClosed,
+    ConsumerCancelled,
 } || channel_mod.Error;
 
 pub const Message = struct {
@@ -114,6 +115,7 @@ pub fn readMessage(channel: *channel_mod.Channel, allocator: std.mem.Allocator) 
                 channel.state = .closed;
                 return Error.ChannelClosed;
             },
+            .basic_cancel => return Error.ConsumerCancelled,
             else => {},
         }
     }

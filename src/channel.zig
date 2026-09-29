@@ -430,6 +430,32 @@ pub const Channel = struct {
         }
     }
 
+    /// Cancels an active consumer subscription (Basic.Cancel).
+    pub fn cancel(self: *Channel, consumer_tag: []const u8) !void {
+        if (self.state != .open) return Error.ChannelClosed;
+
+        const cancel_m = method.Method{
+            .basic_cancel = .{
+                .consumer_tag = consumer_tag,
+                .no_wait = false,
+            },
+        };
+        try self.connection.sendMethod(self.id, cancel_m);
+
+        var payload_buf: [512]u8 = undefined;
+        const resp = try self.connection.readMethod(&payload_buf);
+        if (resp.channel != self.id) return Error.ProtocolViolation;
+
+        switch (resp.method) {
+            .basic_cancel_ok => {},
+            .channel_close => {
+                self.state = .closed;
+                return Error.BrokerError;
+            },
+            else => return Error.UnexpectedMethod,
+        }
+    }
+
     /// Performs a polling poll (`Basic.Get`) on a queue.
     /// Returns the message if one was available, or `null` if the queue was empty.
     pub fn get(self: *Channel, allocator: std.mem.Allocator, queue: []const u8, no_ack: bool) !?consumer_mod.Message {
@@ -714,4 +740,34 @@ test "basic get polling consumption against live rabbitmq" {
         defer msg.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings(test_payload, msg.body);
     }
+}
+
+test "consumer subscription and cancellation against live rabbitmq" {
+    const config = connection_mod.ConnectionConfig{
+        .host = "127.0.0.1",
+        .port = 5674,
+        .username = "guest",
+        .password = "guest",
+        .virtual_host = "/",
+    };
+    var conn = connection_mod.Connection.init(std.testing.allocator, std.testing.io, config);
+    defer conn.deinit();
+
+    conn.connect() catch |err| {
+        if (err == error.ConnectionRefused or err == error.ConnectionFailed) return;
+        return err;
+    };
+    defer conn.close() catch {};
+
+    var ch = try conn.openChannel(5);
+    defer ch.close() catch {};
+
+    const q_name = "zg.test.cancel_queue";
+    _ = try ch.declareQueue(q_name, false, false, true);
+
+    const ctag = "zg.test.consumer.cancel_tag";
+    try ch.consume(q_name, ctag, false);
+
+    // Cancel consumer
+    try ch.cancel(ctag);
 }

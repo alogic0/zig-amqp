@@ -41,6 +41,8 @@ pub const METHOD_BASIC_QOS: u16 = 10;
 pub const METHOD_BASIC_QOS_OK: u16 = 11;
 pub const METHOD_BASIC_CONSUME: u16 = 20;
 pub const METHOD_BASIC_CONSUME_OK: u16 = 21;
+pub const METHOD_BASIC_CANCEL: u16 = 30;
+pub const METHOD_BASIC_CANCEL_OK: u16 = 31;
 pub const METHOD_BASIC_PUBLISH: u16 = 40;
 pub const METHOD_BASIC_RETURN: u16 = 50;
 pub const METHOD_BASIC_DELIVER: u16 = 60;
@@ -320,6 +322,15 @@ pub const BasicConsumeOk = struct {
     consumer_tag: []const u8,
 };
 
+pub const BasicCancel = struct {
+    consumer_tag: []const u8,
+    no_wait: bool = false,
+};
+
+pub const BasicCancelOk = struct {
+    consumer_tag: []const u8,
+};
+
 pub const BasicPublish = struct {
     reserved_1: u16 = 0,
     exchange: []const u8 = "",
@@ -424,6 +435,8 @@ pub const Method = union(enum) {
     basic_qos_ok: BasicQosOk,
     basic_consume: BasicConsume,
     basic_consume_ok: BasicConsumeOk,
+    basic_cancel: BasicCancel,
+    basic_cancel_ok: BasicCancelOk,
     basic_publish: BasicPublish,
     basic_return: BasicReturn,
     basic_deliver: BasicDeliver,
@@ -656,6 +669,18 @@ pub fn encodeMethod(dest: []u8, method: Method) Error!usize {
         .basic_consume_ok => |m| {
             _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
             _ = try wire.writeU16(dest[2..4], METHOD_BASIC_CONSUME_OK);
+            cursor += try wire.writeShortString(dest[cursor..], m.consumer_tag);
+        },
+        .basic_cancel => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
+            _ = try wire.writeU16(dest[2..4], METHOD_BASIC_CANCEL);
+            cursor += try wire.writeShortString(dest[cursor..], m.consumer_tag);
+            const bits: u8 = if (m.no_wait) 1 else 0;
+            cursor += try wire.writeU8(dest[cursor..], bits);
+        },
+        .basic_cancel_ok => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
+            _ = try wire.writeU16(dest[2..4], METHOD_BASIC_CANCEL_OK);
             cursor += try wire.writeShortString(dest[cursor..], m.consumer_tag);
         },
         .basic_publish => |m| {
@@ -1071,6 +1096,19 @@ pub fn decodeMethod(bytes: []const u8) Error!Method {
                 const ctag = try wire.readShortString(bytes[cursor..]);
                 return .{ .basic_consume_ok = .{ .consumer_tag = ctag.str } };
             },
+            METHOD_BASIC_CANCEL => {
+                const ctag = try wire.readShortString(bytes[cursor..]);
+                cursor += ctag.consumed;
+                const bits = try wire.readU8(bytes[cursor..]);
+                return .{ .basic_cancel = .{
+                    .consumer_tag = ctag.str,
+                    .no_wait = (bits & 1) != 0,
+                } };
+            },
+            METHOD_BASIC_CANCEL_OK => {
+                const ctag = try wire.readShortString(bytes[cursor..]);
+                return .{ .basic_cancel_ok = .{ .consumer_tag = ctag.str } };
+            },
             METHOD_BASIC_PUBLISH => {
                 const r1 = try wire.readU16(bytes[cursor..]);
                 cursor += 2;
@@ -1480,6 +1518,26 @@ test "basic qos, consume, deliver and reject roundtrip" {
             try std.testing.expect(!c.no_ack);
             try std.testing.expect(c.exclusive);
         },
+        else => return error.UnexpectedMethod,
+    }
+
+    // Basic.Cancel & CancelOk
+    const cancel_m = Method{ .basic_cancel = .{ .consumer_tag = "ctag-cancel", .no_wait = false } };
+    const w_can = try encodeMethod(&buf, cancel_m);
+    const dec_can = try decodeMethod(buf[0..w_can]);
+    switch (dec_can) {
+        .basic_cancel => |c| {
+            try std.testing.expectEqualStrings("ctag-cancel", c.consumer_tag);
+            try std.testing.expect(!c.no_wait);
+        },
+        else => return error.UnexpectedMethod,
+    }
+
+    const cancel_ok_m = Method{ .basic_cancel_ok = .{ .consumer_tag = "ctag-cancel" } };
+    const w_cok = try encodeMethod(&buf, cancel_ok_m);
+    const dec_cok = try decodeMethod(buf[0..w_cok]);
+    switch (dec_cok) {
+        .basic_cancel_ok => |cok| try std.testing.expectEqualStrings("ctag-cancel", cok.consumer_tag),
         else => return error.UnexpectedMethod,
     }
 
