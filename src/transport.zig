@@ -29,6 +29,7 @@ pub const Transport = struct {
     tls_read_buf: ?[]u8 = null,
     tls_write_buf: ?[]u8 = null,
     tls_client: ?tls.Client = null,
+    write_mutex: Io.Mutex = .init,
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -118,10 +119,14 @@ pub const Transport = struct {
     }
 
     pub fn writeAll(self: *Transport, bytes: []const u8) !void {
+        self.write_mutex.lockUncancelable(self.io);
+        defer self.write_mutex.unlock(self.io);
         try self.writer().writeAll(bytes);
     }
 
     pub fn flush(self: *Transport) !void {
+        self.write_mutex.lockUncancelable(self.io);
+        defer self.write_mutex.unlock(self.io);
         try self.writer().flush();
     }
 
@@ -130,18 +135,21 @@ pub const Transport = struct {
     }
 
     pub fn sendFrame(self: *Transport, frame_type: frame.FrameType, channel: u16, payload: []const u8) !void {
+        self.write_mutex.lockUncancelable(self.io);
+        defer self.write_mutex.unlock(self.io);
+
         var stack_buf: [4096]u8 = undefined;
         const total_needed = frame.HEADER_SIZE + payload.len + frame.FOOTER_SIZE;
         if (total_needed <= stack_buf.len) {
             const n = try frame.writeFrame(&stack_buf, frame_type, channel, payload);
-            try self.writeAll(stack_buf[0..n]);
-            try self.flush();
+            try self.writer().writeAll(stack_buf[0..n]);
+            try self.writer().flush();
         } else {
             const heap_buf = try self.allocator.alloc(u8, total_needed);
             defer self.allocator.free(heap_buf);
             const n = try frame.writeFrame(heap_buf, frame_type, channel, payload);
-            try self.writeAll(heap_buf[0..n]);
-            try self.flush();
+            try self.writer().writeAll(heap_buf[0..n]);
+            try self.writer().flush();
         }
     }
 
