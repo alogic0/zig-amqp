@@ -5,6 +5,7 @@ const frame = @import("frame.zig");
 const method = @import("method.zig");
 const properties = @import("properties.zig");
 const connection_mod = @import("connection.zig");
+const consumer_mod = @import("consumer.zig");
 
 pub const ChannelState = enum {
     closed,
@@ -293,24 +294,24 @@ pub const Channel = struct {
             if (f.frame_type == .method and f.channel == self.id) {
                 const m = try method.decodeMethod(f.payload);
                 switch (m) {
-                    .basic_ack => |ack| {
-                        if (ack.multiple) {
-                            if (tag <= ack.delivery_tag) {
-                                self.last_acked_seq = ack.delivery_tag;
+                    .basic_ack => |a| {
+                        if (a.multiple) {
+                            if (tag <= a.delivery_tag) {
+                                self.last_acked_seq = a.delivery_tag;
                                 return;
                             }
                         } else {
-                            if (ack.delivery_tag == tag) {
+                            if (a.delivery_tag == tag) {
                                 self.last_acked_seq = tag;
                                 return;
                             }
                         }
                     },
-                    .basic_nack => |nack| {
-                        if (nack.multiple) {
-                            if (tag <= nack.delivery_tag) return Error.MessageNacked;
+                    .basic_nack => |n| {
+                        if (n.multiple) {
+                            if (tag <= n.delivery_tag) return Error.MessageNacked;
                         } else {
-                            if (nack.delivery_tag == tag) return Error.MessageNacked;
+                            if (n.delivery_tag == tag) return Error.MessageNacked;
                         }
                     },
                     .channel_close => {
@@ -321,6 +322,83 @@ pub const Channel = struct {
                 }
             }
         }
+    }
+
+    /// Subscribes to a queue to receive delivered messages (Basic.Consume).
+    pub fn consume(
+        self: *Channel,
+        queue: []const u8,
+        consumer_tag: []const u8,
+        no_ack: bool,
+    ) !void {
+        if (self.state != .open) return Error.ChannelClosed;
+
+        const consume_m = method.Method{
+            .basic_consume = .{
+                .queue = queue,
+                .consumer_tag = consumer_tag,
+                .no_local = false,
+                .no_ack = no_ack,
+                .exclusive = false,
+                .no_wait = false,
+            },
+        };
+        try self.connection.sendMethod(self.id, consume_m);
+
+        var payload_buf: [512]u8 = undefined;
+        const resp = try self.connection.readMethod(&payload_buf);
+        if (resp.channel != self.id) return Error.ProtocolViolation;
+
+        switch (resp.method) {
+            .basic_consume_ok => {},
+            .channel_close => {
+                self.state = .closed;
+                return Error.BrokerError;
+            },
+            else => return Error.UnexpectedMethod,
+        }
+    }
+
+    /// Reads and reassembles the next incoming message delivered to this channel.
+    pub fn readMessage(self: *Channel, allocator: std.mem.Allocator) !consumer_mod.Message {
+        return consumer_mod.readMessage(self, allocator);
+    }
+
+    /// Acknowledges one or more messages (Basic.Ack).
+    pub fn ack(self: *Channel, delivery_tag: u64, multiple: bool) !void {
+        if (self.state != .open) return Error.ChannelClosed;
+        const m = method.Method{
+            .basic_ack = .{
+                .delivery_tag = delivery_tag,
+                .multiple = multiple,
+            },
+        };
+        try self.connection.sendMethod(self.id, m);
+    }
+
+    /// Negatively acknowledges one or more messages with requeue option (Basic.Nack).
+    pub fn nack(self: *Channel, delivery_tag: u64, multiple: bool, requeue: bool) !void {
+        if (self.state != .open) return Error.ChannelClosed;
+        const m = method.Method{
+            .basic_nack = .{
+                .delivery_tag = delivery_tag,
+                .multiple = multiple,
+                .requeue = requeue,
+            },
+        };
+        try self.connection.sendMethod(self.id, m);
+    }
+
+    /// Rejects a message with requeue option (Basic.Reject).
+    pub fn reject(self: *Channel, delivery_tag: u64, requeue: bool) !void {
+        if (self.state != .open) return Error.ChannelClosed;
+        const m = method.Method{
+            .basic_reject = .{
+                .delivery_tag = delivery_tag,
+                .requeue = requeue,
+            },
+        };
+        try self.connection.sendMethod(self.id, m);
     }
 
     pub fn close(self: *Channel) !void {
