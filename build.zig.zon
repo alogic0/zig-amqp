@@ -1,0 +1,15 @@
+.{
+    .name = .zig_amqp,
+    .fingerprint = 0xc89895248a31e8bf,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0-dev.2015+3fdcbc03d",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        ".zigversion",
+        "src",
+        "README.md",
+        "PLAN.md",
+    },
+}
