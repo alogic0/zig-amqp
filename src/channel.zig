@@ -98,13 +98,67 @@ pub const Channel = struct {
         }
     }
 
+    /// Declares a queue with optional broker arguments (e.g. x-message-ttl, x-dead-letter-exchange).
+    pub fn declareQueueWithArgs(
+        self: *Channel,
+        queue: []const u8,
+        durable: bool,
+        exclusive: bool,
+        auto_delete: bool,
+        args: []const wire.FieldEntry,
+    ) !method.QueueDeclareOk {
+        if (self.state != .open) return Error.ChannelClosed;
+
+        var args_buf: [2048]u8 = undefined;
+        const args_len = try wire.writeTable(&args_buf, args);
+
+        const dec_m = method.Method{
+            .queue_declare = .{
+                .queue = queue,
+                .passive = false,
+                .durable = durable,
+                .exclusive = exclusive,
+                .auto_delete = auto_delete,
+                .no_wait = false,
+                .arguments = args_buf[0..args_len],
+            },
+        };
+        try self.connection.sendMethod(self.id, dec_m);
+
+        var payload_buf: [1024]u8 = undefined;
+        const resp = try self.connection.readMethod(&payload_buf);
+        if (resp.channel != self.id) return Error.ProtocolViolation;
+
+        switch (resp.method) {
+            .queue_declare_ok => |ok| return ok,
+            .channel_close => {
+                self.state = .closed;
+                return Error.BrokerError;
+            },
+            else => return Error.UnexpectedMethod,
+        }
+    }
+
     pub fn bindQueue(
         self: *Channel,
         queue: []const u8,
         exchange: []const u8,
         routing_key: []const u8,
     ) !void {
+        return self.bindQueueWithArgs(queue, exchange, routing_key, &.{});
+    }
+
+    pub fn bindQueueWithArgs(
+        self: *Channel,
+        queue: []const u8,
+        exchange: []const u8,
+        routing_key: []const u8,
+        args: []const wire.FieldEntry,
+    ) !void {
         if (self.state != .open) return Error.ChannelClosed;
+
+        var args_buf: [2048]u8 = undefined;
+        const args_len = try wire.writeTable(&args_buf, args);
 
         const bind_m = method.Method{
             .queue_bind = .{
@@ -112,6 +166,7 @@ pub const Channel = struct {
                 .exchange = exchange,
                 .routing_key = routing_key,
                 .no_wait = false,
+                .arguments = args_buf[0..args_len],
             },
         };
         try self.connection.sendMethod(self.id, bind_m);
@@ -136,15 +191,31 @@ pub const Channel = struct {
         type_name: []const u8,
         durable: bool,
     ) !void {
+        return self.declareExchangeWithArgs(exchange, type_name, durable, &.{});
+    }
+
+    pub fn declareExchangeWithArgs(
+        self: *Channel,
+        exchange: []const u8,
+        type_name: []const u8,
+        durable: bool,
+        args: []const wire.FieldEntry,
+    ) !void {
         if (self.state != .open) return Error.ChannelClosed;
+
+        var args_buf: [2048]u8 = undefined;
+        const args_len = try wire.writeTable(&args_buf, args);
 
         const ex_m = method.Method{
             .exchange_declare = .{
                 .exchange = exchange,
                 .type_name = type_name,
                 .durable = durable,
+                .passive = false,
                 .auto_delete = false,
+                .internal = false,
                 .no_wait = false,
+                .arguments = args_buf[0..args_len],
             },
         };
         try self.connection.sendMethod(self.id, ex_m);
@@ -522,4 +593,33 @@ test "publisher confirms against live rabbitmq" {
 
     try ch.close();
     try std.testing.expectEqual(ChannelState.closed, ch.state);
+}
+
+test "queue declare with broker arguments against live rabbitmq" {
+    const config = connection_mod.ConnectionConfig{
+        .host = "127.0.0.1",
+        .port = 5674,
+        .username = "guest",
+        .password = "guest",
+        .virtual_host = "/",
+    };
+    var conn = connection_mod.Connection.init(std.testing.allocator, std.testing.io, config);
+    defer conn.deinit();
+
+    conn.connect() catch |err| {
+        if (err == error.ConnectionRefused or err == error.ConnectionFailed) return;
+        return err;
+    };
+    defer conn.close() catch {};
+
+    var ch = try conn.openChannel(3);
+    defer ch.close() catch {};
+
+    // 1. Declare queue with broker arguments (x-message-ttl = 60000ms)
+    const args = [_]wire.FieldEntry{
+        .{ .name = "x-message-ttl", .value = .{ .long_int = 60000 } },
+    };
+    const q_name = "zg.test.get_args_queue";
+    const ok = try ch.declareQueueWithArgs(q_name, false, false, true, &args);
+    try std.testing.expectEqualStrings(q_name, ok.queue);
 }
