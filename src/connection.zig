@@ -27,7 +27,101 @@ pub const ConnectionConfig = struct {
     desired_frame_max: u32 = 131072,
     desired_heartbeat: u16 = 60,
     client_name: []const u8 = "zig-amqp",
+
+    /// Parses an AMQP URI (e.g. amqp://guest:guest@localhost:5672/ or amqps://.../%2F).
+    pub fn fromUri(allocator: std.mem.Allocator, uri_str: []const u8) !ConnectionConfig {
+        var cfg = ConnectionConfig{};
+        var rem: []const u8 = undefined;
+
+        if (std.mem.startsWith(u8, uri_str, "amqp://")) {
+            cfg.tls = false;
+            cfg.port = 5672;
+            rem = uri_str[7..];
+        } else if (std.mem.startsWith(u8, uri_str, "amqps://")) {
+            cfg.tls = true;
+            cfg.port = 5671;
+            rem = uri_str[8..];
+        } else {
+            return error.InvalidUriScheme;
+        }
+
+        // Check for userinfo: [user[:pass]@]host_port[/vhost]
+        if (std.mem.indexOfScalar(u8, rem, '@')) |at_idx| {
+            const userinfo = rem[0..at_idx];
+            rem = rem[at_idx + 1 ..];
+            if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon_idx| {
+                cfg.username = try percentDecode(allocator, userinfo[0..colon_idx]);
+                cfg.password = try percentDecode(allocator, userinfo[colon_idx + 1 ..]);
+            } else {
+                cfg.username = try percentDecode(allocator, userinfo);
+                cfg.password = "";
+            }
+        }
+
+        // Separate host_port from path (vhost)
+        const host_port = if (std.mem.indexOfScalar(u8, rem, '/')) |slash_idx| blk: {
+            const raw_vhost = rem[slash_idx + 1 ..];
+            if (raw_vhost.len > 0) {
+                if (std.mem.eql(u8, raw_vhost, "%2F") or std.mem.eql(u8, raw_vhost, "%2f")) {
+                    cfg.virtual_host = "/";
+                } else {
+                    cfg.virtual_host = try percentDecode(allocator, raw_vhost);
+                }
+            } else {
+                cfg.virtual_host = "/";
+            }
+            break :blk rem[0..slash_idx];
+        } else blk: {
+            cfg.virtual_host = "/";
+            break :blk rem;
+        };
+
+        // Parse host_port into host and optional port
+        if (std.mem.indexOfScalar(u8, host_port, ':')) |port_colon| {
+            cfg.host = host_port[0..port_colon];
+            const port_str = host_port[port_colon + 1 ..];
+            cfg.port = try std.fmt.parseInt(u16, port_str, 10);
+        } else {
+            if (host_port.len > 0) {
+                cfg.host = host_port;
+            }
+        }
+
+        if (cfg.tls and cfg.tls_hostname == null) {
+            cfg.tls_hostname = cfg.host;
+        }
+
+        return cfg;
+    }
 };
+
+fn percentDecode(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, input, '%') == null) {
+        return input;
+    }
+    const out = try allocator.alloc(u8, input.len);
+    var in_idx: usize = 0;
+    var out_idx: usize = 0;
+    while (in_idx < input.len) {
+        if (input[in_idx] == '%' and in_idx + 2 < input.len) {
+            const hex = input[in_idx + 1 .. in_idx + 3];
+            const byte = std.fmt.parseInt(u8, hex, 16) catch {
+                out[out_idx] = input[in_idx];
+                out_idx += 1;
+                in_idx += 1;
+                continue;
+            };
+            out[out_idx] = byte;
+            out_idx += 1;
+            in_idx += 3;
+        } else {
+            out[out_idx] = input[in_idx];
+            out_idx += 1;
+            in_idx += 1;
+        }
+    }
+    return out[0..out_idx];
+}
 
 pub const Error = error{
     ConnectionClosed,
@@ -36,6 +130,7 @@ pub const Error = error{
     HandshakeFailed,
     CredentialsTooLong,
     ProtocolViolation,
+    InvalidUriScheme,
 } || wire.Error || frame.Error || method.Error || transport_mod.Error;
 
 pub const Connection = struct {
@@ -308,4 +403,47 @@ test "live connection handshake against rabbitmq on port 5674" {
 
     try conn.close();
     try std.testing.expectEqual(ConnectionState.closed, conn.state);
+}
+
+test "parse amqp URI variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 1. Plain amqp with default port and vhost
+    {
+        const cfg = try ConnectionConfig.fromUri(alloc, "amqp://127.0.0.1:5674");
+        try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
+        try std.testing.expectEqual(@as(u16, 5674), cfg.port);
+        try std.testing.expectEqualStrings("guest", cfg.username);
+        try std.testing.expectEqualStrings("guest", cfg.password);
+        try std.testing.expectEqualStrings("/", cfg.virtual_host);
+        try std.testing.expect(!cfg.tls);
+    }
+
+    // 2. amqp with user, pass, and %2F root vhost
+    {
+        const cfg = try ConnectionConfig.fromUri(alloc, "amqp://app_user:secret_pass@rabbitmq.internal:5672/%2F");
+        try std.testing.expectEqualStrings("rabbitmq.internal", cfg.host);
+        try std.testing.expectEqual(@as(u16, 5672), cfg.port);
+        try std.testing.expectEqualStrings("app_user", cfg.username);
+        try std.testing.expectEqualStrings("secret_pass", cfg.password);
+        try std.testing.expectEqualStrings("/", cfg.virtual_host);
+        try std.testing.expect(!cfg.tls);
+    }
+
+    // 3. amqps with custom vhost and percent-encoded characters
+    {
+        const cfg = try ConnectionConfig.fromUri(alloc, "amqps://admin:p%40ss@broker.example.com:5671/my_vhost");
+        try std.testing.expectEqualStrings("broker.example.com", cfg.host);
+        try std.testing.expectEqual(@as(u16, 5671), cfg.port);
+        try std.testing.expectEqualStrings("admin", cfg.username);
+        try std.testing.expectEqualStrings("p@ss", cfg.password);
+        try std.testing.expectEqualStrings("my_vhost", cfg.virtual_host);
+        try std.testing.expect(cfg.tls);
+        try std.testing.expectEqualStrings("broker.example.com", cfg.tls_hostname.?);
+    }
+
+    // 4. Invalid scheme error
+    try std.testing.expectError(error.InvalidUriScheme, ConnectionConfig.fromUri(alloc, "http://localhost:5672"));
 }

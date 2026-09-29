@@ -31,6 +31,12 @@ pub const Client = struct {
         };
     }
 
+    /// Initializes a client by parsing an AMQP connection URI (e.g. "amqp://guest:guest@localhost:5672/").
+    pub fn initUri(allocator: std.mem.Allocator, io: Io, uri: []const u8) !Client {
+        const config = try Config.fromUri(allocator, uri);
+        return Client.init(allocator, io, config);
+    }
+
     pub fn deinit(self: *Client) void {
         self.connection.deinit();
         self.topology.deinit();
@@ -104,4 +110,20 @@ test "client connect, channel, publish, and clean shutdown" {
     try ch.publish("", "zg.test.client_queue", "{\"msg\": \"hello client\"}", .{
         .content_type = "application/json",
     }, false);
+}
+
+test "client initUri against live rabbitmq" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var client = try Client.initUri(arena.allocator(), std.testing.io, "amqp://guest:guest@127.0.0.1:5674/%2F");
+    defer client.deinit();
+
+    client.connect() catch |err| {
+        if (err == error.ConnectionRefused or err == error.ConnectionFailed) return;
+        return err;
+    };
+    defer client.close() catch {};
+
+    try std.testing.expectEqual(connection_mod.ConnectionState.open, client.connection.state);
 }
