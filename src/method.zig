@@ -59,6 +59,93 @@ pub const Error = wire.Error || error{
     UnknownMethod,
 };
 
+/// Standard AMQP 0-9-1 Reply / Error Codes (from official spec).
+pub const ReplyCode = enum(u16) {
+    // Success
+    reply_success = 200,
+
+    // Soft errors (Channel exceptions)
+    content_too_large = 311,
+    no_route = 312,
+    no_consumers = 313,
+    access_refused = 403,
+    not_found = 404,
+    resource_locked = 405,
+    precondition_failed = 406,
+
+    // Hard errors (Connection exceptions)
+    connection_forced = 320,
+    invalid_path = 402,
+    frame_error = 501,
+    syntax_error = 502,
+    command_invalid = 503,
+    channel_error = 504,
+    unexpected_frame = 505,
+    resource_error = 506,
+    not_allowed = 530,
+    not_implemented = 540,
+    internal_error = 541,
+
+    _,
+
+    pub fn isSoftError(self: ReplyCode) bool {
+        return switch (self) {
+            .content_too_large,
+            .no_route,
+            .no_consumers,
+            .access_refused,
+            .not_found,
+            .resource_locked,
+            .precondition_failed,
+            => true,
+            else => false,
+        };
+    }
+
+    pub fn isHardError(self: ReplyCode) bool {
+        return switch (self) {
+            .connection_forced,
+            .invalid_path,
+            .frame_error,
+            .syntax_error,
+            .command_invalid,
+            .channel_error,
+            .unexpected_frame,
+            .resource_error,
+            .not_allowed,
+            .not_implemented,
+            .internal_error,
+            => true,
+            else => false,
+        };
+    }
+
+    pub fn description(self: ReplyCode) []const u8 {
+        return switch (self) {
+            .reply_success => "Success",
+            .content_too_large => "Content too large (311)",
+            .no_route => "No route for mandatory message (312)",
+            .no_consumers => "No consumers available for immediate delivery (313)",
+            .connection_forced => "Connection forced close by operator or system (320)",
+            .invalid_path => "Invalid virtual host path (402)",
+            .access_refused => "Access refused: unauthorized credentials or permissions (403)",
+            .not_found => "Resource not found (404)",
+            .resource_locked => "Resource locked by another client or exclusivity rule (405)",
+            .precondition_failed => "Precondition failed: configuration conflict (406)",
+            .frame_error => "Frame malformed or syntax corrupted (501)",
+            .syntax_error => "Syntax error: invalid frame sequence (502)",
+            .command_invalid => "Command invalid in current connection/channel state (503)",
+            .channel_error => "Channel error: action attempted on closed or invalid channel (504)",
+            .unexpected_frame => "Unexpected frame type received (505)",
+            .resource_error => "Resource error: memory, disk, or queue exhaustion (506)",
+            .not_allowed => "Operation not allowed (530)",
+            .not_implemented => "Feature not implemented by broker (540)",
+            .internal_error => "Internal broker error (541)",
+            _ => "Unknown AMQP reply code",
+        };
+    }
+};
+
 // --- Connection Methods ---
 
 pub const ConnectionStart = struct {
@@ -103,6 +190,10 @@ pub const ConnectionClose = struct {
     reply_text: []const u8 = "",
     class_id: u16 = 0,
     method_id: u16 = 0,
+
+    pub fn code(self: ConnectionClose) ReplyCode {
+        return @enumFromInt(self.reply_code);
+    }
 };
 
 pub const ConnectionCloseOk = struct {};
@@ -128,6 +219,10 @@ pub const ChannelClose = struct {
     reply_text: []const u8 = "",
     class_id: u16 = 0,
     method_id: u16 = 0,
+
+    pub fn code(self: ChannelClose) ReplyCode {
+        return @enumFromInt(self.reply_code);
+    }
 };
 
 pub const ChannelCloseOk = struct {};
@@ -262,6 +357,10 @@ pub const BasicReturn = struct {
     reply_text: []const u8,
     exchange: []const u8,
     routing_key: []const u8,
+
+    pub fn code(self: BasicReturn) ReplyCode {
+        return @enumFromInt(self.reply_code);
+    }
 };
 
 pub const BasicGet = struct {
@@ -1494,4 +1593,50 @@ test "basic qos, consume, deliver and reject roundtrip" {
         .connection_unblocked => {},
         else => return error.UnexpectedMethod,
     }
+}
+
+test "AMQP reply codes and error classifications" {
+    // 1. Success code
+    const success = ReplyCode.reply_success;
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(success));
+    try std.testing.expect(!success.isSoftError());
+    try std.testing.expect(!success.isHardError());
+
+    // 2. Soft errors
+    const not_found = ReplyCode.not_found;
+    try std.testing.expectEqual(@as(u16, 404), @intFromEnum(not_found));
+    try std.testing.expect(not_found.isSoftError());
+    try std.testing.expect(!not_found.isHardError());
+
+    const precon = ReplyCode.precondition_failed;
+    try std.testing.expectEqual(@as(u16, 406), @intFromEnum(precon));
+    try std.testing.expect(precon.isSoftError());
+
+    // 3. Hard errors
+    const forced = ReplyCode.connection_forced;
+    try std.testing.expectEqual(@as(u16, 320), @intFromEnum(forced));
+    try std.testing.expect(!forced.isSoftError());
+    try std.testing.expect(forced.isHardError());
+
+    const frame_err = ReplyCode.frame_error;
+    try std.testing.expect(frame_err.isHardError());
+
+    // 4. Descriptions
+    try std.testing.expectEqualStrings("Resource not found (404)", not_found.description());
+    try std.testing.expectEqualStrings("Success", success.description());
+
+    // 5. Method struct typed code() helper
+    const ch_close = ChannelClose{ .reply_code = 404 };
+    try std.testing.expectEqual(ReplyCode.not_found, ch_close.code());
+
+    const conn_close = ConnectionClose{ .reply_code = 320 };
+    try std.testing.expectEqual(ReplyCode.connection_forced, conn_close.code());
+
+    const ret = BasicReturn{
+        .reply_code = 312,
+        .reply_text = "NO_ROUTE",
+        .exchange = "",
+        .routing_key = "k",
+    };
+    try std.testing.expectEqual(ReplyCode.no_route, ret.code());
 }

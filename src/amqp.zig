@@ -22,6 +22,7 @@ pub const BasicProperties = properties.BasicProperties;
 pub const DeliveryMode = properties.DeliveryMode;
 pub const FieldValue = wire.FieldValue;
 pub const FieldEntry = wire.FieldEntry;
+pub const ReplyCode = method.ReplyCode;
 
 test {
     std.testing.refAllDecls(@This());
