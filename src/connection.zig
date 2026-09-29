@@ -314,12 +314,15 @@ pub const Connection = struct {
     }
 
     fn heartbeatWorker(self: *Connection, interval_sec: u16) void {
-        const step = std.Io.Duration.fromMilliseconds(250);
         const total_steps = @as(u32, interval_sec) * 4;
         var counter: u32 = 0;
+        const req = std.os.linux.timespec{
+            .sec = 0,
+            .nsec = 250 * 1000_000,
+        };
 
         while (!self.heartbeat_stop.load(.acquire)) {
-            std.Io.sleep(self.io, step, .real) catch break;
+            _ = std.os.linux.nanosleep(&req, null);
             counter += 1;
             if (counter >= total_steps) {
                 counter = 0;
