@@ -185,6 +185,51 @@ pub const Channel = struct {
         }
     }
 
+    pub fn unbindQueue(
+        self: *Channel,
+        queue: []const u8,
+        exchange: []const u8,
+        routing_key: []const u8,
+    ) !void {
+        return self.unbindQueueWithArgs(queue, exchange, routing_key, &.{});
+    }
+
+    pub fn unbindQueueWithArgs(
+        self: *Channel,
+        queue: []const u8,
+        exchange: []const u8,
+        routing_key: []const u8,
+        args: []const wire.FieldEntry,
+    ) !void {
+        if (self.state != .open) return Error.ChannelClosed;
+
+        var args_buf: [2048]u8 = undefined;
+        const args_len = try wire.writeTable(&args_buf, args);
+
+        const unbind_m = method.Method{
+            .queue_unbind = .{
+                .queue = queue,
+                .exchange = exchange,
+                .routing_key = routing_key,
+                .arguments = args_buf[0..args_len],
+            },
+        };
+        try self.connection.sendMethod(self.id, unbind_m);
+
+        var payload_buf: [512]u8 = undefined;
+        const resp = try self.connection.readMethod(&payload_buf);
+        if (resp.channel != self.id) return Error.ProtocolViolation;
+
+        switch (resp.method) {
+            .queue_unbind_ok => {},
+            .channel_close => {
+                self.state = .closed;
+                return Error.BrokerError;
+            },
+            else => return Error.UnexpectedMethod,
+        }
+    }
+
     pub fn declareExchange(
         self: *Channel,
         exchange: []const u8,
@@ -770,4 +815,36 @@ test "consumer subscription and cancellation against live rabbitmq" {
 
     // Cancel consumer
     try ch.cancel(ctag);
+}
+
+test "queue bind and unbind against live rabbitmq" {
+    const config = connection_mod.ConnectionConfig{
+        .host = "127.0.0.1",
+        .port = 5674,
+        .username = "guest",
+        .password = "guest",
+        .virtual_host = "/",
+    };
+    var conn = connection_mod.Connection.init(std.testing.allocator, std.testing.io, config);
+    defer conn.deinit();
+
+    conn.connect() catch |err| {
+        if (err == error.ConnectionRefused or err == error.ConnectionFailed) return;
+        return err;
+    };
+    defer conn.close() catch {};
+
+    var ch = try conn.openChannel(6);
+    defer ch.close() catch {};
+
+    const ex_name = "zg.test.unbind_exchange";
+    const q_name = "zg.test.unbind_queue";
+    const rk = "zg.test.unbind_rk";
+
+    try ch.declareExchange(ex_name, "direct", false);
+    _ = try ch.declareQueue(q_name, false, false, true);
+
+    // Bind then unbind
+    try ch.bindQueue(q_name, ex_name, rk);
+    try ch.unbindQueue(q_name, ex_name, rk);
 }

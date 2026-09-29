@@ -36,6 +36,8 @@ pub const METHOD_QUEUE_PURGE: u16 = 30;
 pub const METHOD_QUEUE_PURGE_OK: u16 = 31;
 pub const METHOD_QUEUE_DELETE: u16 = 40;
 pub const METHOD_QUEUE_DELETE_OK: u16 = 41;
+pub const METHOD_QUEUE_UNBIND: u16 = 50;
+pub const METHOD_QUEUE_UNBIND_OK: u16 = 51;
 
 pub const METHOD_BASIC_QOS: u16 = 10;
 pub const METHOD_BASIC_QOS_OK: u16 = 11;
@@ -297,6 +299,16 @@ pub const QueueDeleteOk = struct {
     message_count: u32,
 };
 
+pub const QueueUnbind = struct {
+    reserved_1: u16 = 0,
+    queue: []const u8,
+    exchange: []const u8,
+    routing_key: []const u8 = "",
+    arguments: []const u8 = &[_]u8{ 0, 0, 0, 0 }, // raw table
+};
+
+pub const QueueUnbindOk = struct {};
+
 // --- Basic Methods ---
 
 pub const BasicQos = struct {
@@ -430,6 +442,8 @@ pub const Method = union(enum) {
     queue_purge_ok: QueuePurgeOk,
     queue_delete: QueueDelete,
     queue_delete_ok: QueueDeleteOk,
+    queue_unbind: QueueUnbind,
+    queue_unbind_ok: QueueUnbindOk,
 
     basic_qos: BasicQos,
     basic_qos_ok: BasicQosOk,
@@ -637,6 +651,21 @@ pub fn encodeMethod(dest: []u8, method: Method) Error!usize {
             _ = try wire.writeU16(dest[0..2], CLASS_QUEUE);
             _ = try wire.writeU16(dest[2..4], METHOD_QUEUE_DELETE_OK);
             cursor += try wire.writeU32(dest[cursor..], m.message_count);
+        },
+        .queue_unbind => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_QUEUE);
+            _ = try wire.writeU16(dest[2..4], METHOD_QUEUE_UNBIND);
+            cursor += try wire.writeU16(dest[cursor..], m.reserved_1);
+            cursor += try wire.writeShortString(dest[cursor..], m.queue);
+            cursor += try wire.writeShortString(dest[cursor..], m.exchange);
+            cursor += try wire.writeShortString(dest[cursor..], m.routing_key);
+            if (dest.len < cursor + m.arguments.len) return wire.Error.BufferTooSmall;
+            @memcpy(dest[cursor .. cursor + m.arguments.len], m.arguments);
+            cursor += m.arguments.len;
+        },
+        .queue_unbind_ok => {
+            _ = try wire.writeU16(dest[0..2], CLASS_QUEUE);
+            _ = try wire.writeU16(dest[2..4], METHOD_QUEUE_UNBIND_OK);
         },
         .basic_qos => |m| {
             _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
@@ -1048,6 +1077,31 @@ pub fn decodeMethod(bytes: []const u8) Error!Method {
             METHOD_QUEUE_DELETE_OK => {
                 const mc = try wire.readU32(bytes[cursor..]);
                 return .{ .queue_delete_ok = .{ .message_count = mc } };
+            },
+            METHOD_QUEUE_UNBIND => {
+                const r1 = try wire.readU16(bytes[cursor..]);
+                cursor += 2;
+                const q = try wire.readShortString(bytes[cursor..]);
+                cursor += q.consumed;
+                const ex = try wire.readShortString(bytes[cursor..]);
+                cursor += ex.consumed;
+                const rk = try wire.readShortString(bytes[cursor..]);
+                cursor += rk.consumed;
+                if (bytes.len < cursor + 4) return wire.Error.UnexpectedEof;
+                const tlen = @as(usize, @intCast(try wire.readU32(bytes[cursor .. cursor + 4])));
+                const total_t = 4 + tlen;
+                if (bytes.len < cursor + total_t) return wire.Error.UnexpectedEof;
+                const args = bytes[cursor .. cursor + total_t];
+                return .{ .queue_unbind = .{
+                    .reserved_1 = r1,
+                    .queue = q.str,
+                    .exchange = ex.str,
+                    .routing_key = rk.str,
+                    .arguments = args,
+                } };
+            },
+            METHOD_QUEUE_UNBIND_OK => {
+                return .{ .queue_unbind_ok = .{} };
             },
             else => return Error.UnknownMethod,
         },
@@ -1481,6 +1535,33 @@ test "exchange declare, queue bind, purge and delete roundtrip" {
             try std.testing.expectEqualStrings("events-q", d.queue);
             try std.testing.expect(d.if_unused);
         },
+        else => return error.UnexpectedMethod,
+    }
+
+    // Queue.Unbind & Queue.UnbindOk
+    const q_unbind = Method{
+        .queue_unbind = .{
+            .queue = "events-q",
+            .exchange = "events-topic",
+            .routing_key = "lead.*",
+        },
+    };
+    const w_qub = try encodeMethod(&buf, q_unbind);
+    const dec_qub = try decodeMethod(buf[0..w_qub]);
+    switch (dec_qub) {
+        .queue_unbind => |ub| {
+            try std.testing.expectEqualStrings("events-q", ub.queue);
+            try std.testing.expectEqualStrings("events-topic", ub.exchange);
+            try std.testing.expectEqualStrings("lead.*", ub.routing_key);
+        },
+        else => return error.UnexpectedMethod,
+    }
+
+    const q_unbind_ok = Method{ .queue_unbind_ok = .{} };
+    const w_qubok = try encodeMethod(&buf, q_unbind_ok);
+    const dec_qubok = try decodeMethod(buf[0..w_qubok]);
+    switch (dec_qubok) {
+        .queue_unbind_ok => {},
         else => return error.UnexpectedMethod,
     }
 }
