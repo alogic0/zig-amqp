@@ -1,6 +1,6 @@
 .{
     .name = .zig_amqp,
-    .fingerprint = 0xc89895248a31e8bf,
+    .fingerprint = 0x4c9acd614b6e64ea,
     .version = "0.1.0",
     .minimum_zig_version = "0.17.0-dev.2015+3fdcbc03d",
     .dependencies = .{},
