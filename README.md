@@ -14,6 +14,7 @@ A production-hardened, pure-Zig implementation of the AMQP 0-9-1 specification w
 - **Autonomous Heartbeat Worker**: Background heartbeat thread with thread-safe framing mutex preventing connection drops during idle periods.
 - **AMQP URI Parser**: Built-in parsing for standard RFC 3986 connection URIs (`amqp://` and `amqps://`) with credentials and vhost percent-decoding.
 - **RabbitMQ Queue Argument Tables**: Full support for `x-dead-letter-exchange`, `x-message-ttl`, `x-max-length`, and header exchange routing.
+- **Specification-Hardened AMQP Primitives**: Full support for `ReplyCode` error classification (soft vs. hard channel/connection errors), consumer cancellation (`Basic.Cancel` / `Basic.CancelOk`), queue unbinding (`Queue.Unbind`), and exchange deletion (`Exchange.Delete`).
 
 ---
 
@@ -179,4 +180,4 @@ Run the full unit and integration test suite:
 zig build test --summary all
 ```
 
-All 27 tests execute with 100% pass rate, zero memory leaks, and verify protocol framing, table codecs, TLS transport, publisher confirms, consumer frame reassembly, URI parsing, background heartbeats, queue arguments, and live RabbitMQ handshakes.
+All 31 tests execute with 100% pass rate, zero memory leaks, and verify protocol framing, table codecs, TLS transport, publisher confirms, consumer frame reassembly, URI parsing, background heartbeats, queue arguments, queue unbinding, consumer cancellation, exchange deletion, and live RabbitMQ handshakes.
