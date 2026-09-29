@@ -5,6 +5,7 @@ const wire = @import("wire.zig");
 const frame = @import("frame.zig");
 const method = @import("method.zig");
 const transport_mod = @import("transport.zig");
+const channel_mod = @import("channel.zig");
 
 pub const ConnectionState = enum {
     closed,
@@ -227,6 +228,16 @@ pub const Connection = struct {
         self.transport.?.close();
         self.transport = null;
         self.state = .closed;
+    }
+
+    pub fn openChannel(self: *Connection, channel_id: u16) !channel_mod.Channel {
+        var ch = channel_mod.Channel{
+            .id = channel_id,
+            .connection = self,
+            .state = .closed,
+        };
+        try ch.open();
+        return ch;
     }
 
     pub fn deinit(self: *Connection) void {

@@ -7,6 +7,7 @@ pub const properties = @import("properties.zig");
 pub const method = @import("method.zig");
 pub const transport = @import("transport.zig");
 pub const connection = @import("connection.zig");
+pub const channel = @import("channel.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -16,4 +17,5 @@ test {
     _ = method;
     _ = transport;
     _ = connection;
+    _ = channel;
 }
