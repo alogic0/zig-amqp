@@ -49,6 +49,9 @@ pub const Connection = struct {
     negotiated_frame_max: u32 = 0,
     negotiated_heartbeat: u16 = 0,
 
+    heartbeat_thread: ?std.Thread = null,
+    heartbeat_stop: std.atomic.Value(bool) = .init(false),
+
     pub fn init(allocator: std.mem.Allocator, io: Io, config: ConnectionConfig) Connection {
         return .{
             .allocator = allocator,
@@ -179,6 +182,12 @@ pub const Connection = struct {
         }
 
         self.state = .open;
+
+        if (self.negotiated_heartbeat > 0) {
+            self.heartbeat_stop.store(false, .release);
+            const interval_sec = @max(1, self.negotiated_heartbeat / 2);
+            self.heartbeat_thread = std.Thread.spawn(.{}, heartbeatWorker, .{ self, interval_sec }) catch null;
+        }
     }
 
     /// Sends an AMQP method payload encoded inside a Frame.
@@ -201,8 +210,35 @@ pub const Connection = struct {
         };
     }
 
+    pub fn stopHeartbeat(self: *Connection) void {
+        if (self.heartbeat_thread) |t| {
+            self.heartbeat_stop.store(true, .release);
+            t.join();
+            self.heartbeat_thread = null;
+        }
+    }
+
+    fn heartbeatWorker(self: *Connection, interval_sec: u16) void {
+        const step = std.Io.Duration.fromMilliseconds(250);
+        const total_steps = @as(u32, interval_sec) * 4;
+        var counter: u32 = 0;
+
+        while (!self.heartbeat_stop.load(.acquire)) {
+            std.Io.sleep(self.io, step, .real) catch break;
+            counter += 1;
+            if (counter >= total_steps) {
+                counter = 0;
+                if (self.state != .open) break;
+                if (self.transport) |*tr| {
+                    tr.sendFrame(.heartbeat, 0, "") catch break;
+                }
+            }
+        }
+    }
+
     /// Closes the connection gracefully with Connection.Close and Connection.CloseOk.
     pub fn close(self: *Connection) !void {
+        self.stopHeartbeat();
         if (self.state != .open or self.transport == null) return;
         self.state = .closing;
 
@@ -241,6 +277,7 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
+        self.stopHeartbeat();
         if (self.transport) |*tr| {
             tr.close();
             self.transport = null;
