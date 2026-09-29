@@ -117,8 +117,7 @@ pub const FieldValue = union(enum) {
     long_long_int: i64,
     float_val: f32,
     double_val: f64,
-    short_string: []const u8,
-    long_string: []const u8,
+    string: []const u8,
     timestamp: i64,
     void_val: void,
     raw_table: []const u8,
@@ -185,12 +184,7 @@ pub fn writeFieldValue(dest: []u8, value: FieldValue) Error!usize {
             const written = try writeU64(dest[1..], @bitCast(d));
             return 1 + written;
         },
-        .short_string => |s| {
-            dest[0] = 's';
-            const written = try writeShortString(dest[1..], s);
-            return 1 + written;
-        },
-        .long_string => |s| {
+        .string => |s| {
             dest[0] = 'S';
             const written = try writeLongString(dest[1..], s);
             return 1 + written;
@@ -276,7 +270,7 @@ pub fn readFieldValue(bytes: []const u8) Error!struct { value: FieldValue, consu
         },
         'S' => {
             const parsed = try readLongString(rest);
-            return .{ .value = .{ .long_string = parsed.str }, .consumed = 1 + parsed.consumed };
+            return .{ .value = .{ .string = parsed.str }, .consumed = 1 + parsed.consumed };
         },
         'T' => {
             if (rest.len < 8) return Error.UnexpectedEof;
@@ -375,8 +369,8 @@ test "field table serialization and streaming iterator" {
     var buf: [512]u8 = undefined;
 
     const entries = [_]FieldEntry{
-        .{ .name = "connection_name", .value = .{ .long_string = "callapp-worker/1" } },
-        .{ .name = "version", .value = .{ .long_string = "1.0.0" } },
+        .{ .name = "connection_name", .value = .{ .string = "callapp-worker/1" } },
+        .{ .name = "version", .value = .{ .string = "1.0.0" } },
         .{ .name = "heartbeat", .value = .{ .short_int = 60 } },
         .{ .name = "active", .value = .{ .bool_val = true } },
     };
@@ -389,11 +383,11 @@ test "field table serialization and streaming iterator" {
 
     const e1 = (try iter.next()).?;
     try std.testing.expectEqualStrings("connection_name", e1.name);
-    try std.testing.expectEqualStrings("callapp-worker/1", e1.value.long_string);
+    try std.testing.expectEqualStrings("callapp-worker/1", e1.value.string);
 
     const e2 = (try iter.next()).?;
     try std.testing.expectEqualStrings("version", e2.name);
-    try std.testing.expectEqualStrings("1.0.0", e2.value.long_string);
+    try std.testing.expectEqualStrings("1.0.0", e2.value.string);
 
     const e3 = (try iter.next()).?;
     try std.testing.expectEqualStrings("heartbeat", e3.name);

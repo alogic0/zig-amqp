@@ -3,9 +3,13 @@ const std = @import("std");
 
 pub const wire = @import("wire.zig");
 pub const frame = @import("frame.zig");
+pub const properties = @import("properties.zig");
+pub const method = @import("method.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = wire;
     _ = frame;
+    _ = properties;
+    _ = method;
 }
