@@ -27,6 +27,8 @@ pub const METHOD_CHANNEL_CLOSE_OK: u16 = 41;
 
 pub const METHOD_EXCHANGE_DECLARE: u16 = 10;
 pub const METHOD_EXCHANGE_DECLARE_OK: u16 = 11;
+pub const METHOD_EXCHANGE_DELETE: u16 = 20;
+pub const METHOD_EXCHANGE_DELETE_OK: u16 = 21;
 
 pub const METHOD_QUEUE_DECLARE: u16 = 10;
 pub const METHOD_QUEUE_DECLARE_OK: u16 = 11;
@@ -247,6 +249,15 @@ pub const ExchangeDeclare = struct {
 
 pub const ExchangeDeclareOk = struct {};
 
+pub const ExchangeDelete = struct {
+    reserved_1: u16 = 0,
+    exchange: []const u8,
+    if_unused: bool = false,
+    no_wait: bool = false,
+};
+
+pub const ExchangeDeleteOk = struct {};
+
 // --- Queue Methods ---
 
 pub const QueueDeclare = struct {
@@ -433,6 +444,8 @@ pub const Method = union(enum) {
 
     exchange_declare: ExchangeDeclare,
     exchange_declare_ok: ExchangeDeclareOk,
+    exchange_delete: ExchangeDelete,
+    exchange_delete_ok: ExchangeDeleteOk,
 
     queue_declare: QueueDeclare,
     queue_declare_ok: QueueDeclareOk,
@@ -582,6 +595,20 @@ pub fn encodeMethod(dest: []u8, method: Method) Error!usize {
         .exchange_declare_ok => {
             _ = try wire.writeU16(dest[0..2], CLASS_EXCHANGE);
             _ = try wire.writeU16(dest[2..4], METHOD_EXCHANGE_DECLARE_OK);
+        },
+        .exchange_delete => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_EXCHANGE);
+            _ = try wire.writeU16(dest[2..4], METHOD_EXCHANGE_DELETE);
+            cursor += try wire.writeU16(dest[cursor..], m.reserved_1);
+            cursor += try wire.writeShortString(dest[cursor..], m.exchange);
+            var bits: u8 = 0;
+            if (m.if_unused) bits |= 1 << 0;
+            if (m.no_wait) bits |= 1 << 1;
+            cursor += try wire.writeU8(dest[cursor..], bits);
+        },
+        .exchange_delete_ok => {
+            _ = try wire.writeU16(dest[0..2], CLASS_EXCHANGE);
+            _ = try wire.writeU16(dest[2..4], METHOD_EXCHANGE_DELETE_OK);
         },
         .queue_declare => |m| {
             _ = try wire.writeU16(dest[0..2], CLASS_QUEUE);
@@ -977,6 +1004,22 @@ pub fn decodeMethod(bytes: []const u8) Error!Method {
             },
             METHOD_EXCHANGE_DECLARE_OK => {
                 return .{ .exchange_declare_ok = .{} };
+            },
+            METHOD_EXCHANGE_DELETE => {
+                const r1 = try wire.readU16(bytes[cursor..]);
+                cursor += 2;
+                const ex = try wire.readShortString(bytes[cursor..]);
+                cursor += ex.consumed;
+                const bits = try wire.readU8(bytes[cursor..]);
+                return .{ .exchange_delete = .{
+                    .reserved_1 = r1,
+                    .exchange = ex.str,
+                    .if_unused = (bits & (1 << 0)) != 0,
+                    .no_wait = (bits & (1 << 1)) != 0,
+                } };
+            },
+            METHOD_EXCHANGE_DELETE_OK => {
+                return .{ .exchange_delete_ok = .{} };
             },
             else => return Error.UnknownMethod,
         },
@@ -1495,6 +1538,26 @@ test "exchange declare, queue bind, purge and delete roundtrip" {
             try std.testing.expectEqualStrings("topic", e.type_name);
             try std.testing.expect(e.durable);
         },
+        else => return error.UnexpectedMethod,
+    }
+
+    // Exchange.Delete & Exchange.DeleteOk
+    const ex_del = Method{ .exchange_delete = .{ .exchange = "events-topic", .if_unused = true } };
+    const w_exd = try encodeMethod(&buf, ex_del);
+    const dec_exd = try decodeMethod(buf[0..w_exd]);
+    switch (dec_exd) {
+        .exchange_delete => |ed| {
+            try std.testing.expectEqualStrings("events-topic", ed.exchange);
+            try std.testing.expect(ed.if_unused);
+        },
+        else => return error.UnexpectedMethod,
+    }
+
+    const ex_del_ok = Method{ .exchange_delete_ok = .{} };
+    const w_exdok = try encodeMethod(&buf, ex_del_ok);
+    const dec_exdok = try decodeMethod(buf[0..w_exdok]);
+    switch (dec_exdok) {
+        .exchange_delete_ok => {},
         else => return error.UnexpectedMethod,
     }
 

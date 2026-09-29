@@ -279,6 +279,32 @@ pub const Channel = struct {
         }
     }
 
+    pub fn deleteExchange(self: *Channel, exchange: []const u8, if_unused: bool) !void {
+        if (self.state != .open) return Error.ChannelClosed;
+
+        const del_m = method.Method{
+            .exchange_delete = .{
+                .exchange = exchange,
+                .if_unused = if_unused,
+                .no_wait = false,
+            },
+        };
+        try self.connection.sendMethod(self.id, del_m);
+
+        var payload_buf: [512]u8 = undefined;
+        const resp = try self.connection.readMethod(&payload_buf);
+        if (resp.channel != self.id) return Error.ProtocolViolation;
+
+        switch (resp.method) {
+            .exchange_delete_ok => {},
+            .channel_close => {
+                self.state = .closed;
+                return Error.BrokerError;
+            },
+            else => return Error.UnexpectedMethod,
+        }
+    }
+
     pub fn setQos(self: *Channel, prefetch_count: u16, global: bool) !void {
         if (self.state != .open) return Error.ChannelClosed;
 
@@ -847,4 +873,29 @@ test "queue bind and unbind against live rabbitmq" {
     // Bind then unbind
     try ch.bindQueue(q_name, ex_name, rk);
     try ch.unbindQueue(q_name, ex_name, rk);
+}
+
+test "exchange declare and delete against live rabbitmq" {
+    const config = connection_mod.ConnectionConfig{
+        .host = "127.0.0.1",
+        .port = 5674,
+        .username = "guest",
+        .password = "guest",
+        .virtual_host = "/",
+    };
+    var conn = connection_mod.Connection.init(std.testing.allocator, std.testing.io, config);
+    defer conn.deinit();
+
+    conn.connect() catch |err| {
+        if (err == error.ConnectionRefused or err == error.ConnectionFailed) return;
+        return err;
+    };
+    defer conn.close() catch {};
+
+    var ch = try conn.openChannel(7);
+    defer ch.close() catch {};
+
+    const ex_name = "zg.test.delete_exchange";
+    try ch.declareExchange(ex_name, "direct", false);
+    try ch.deleteExchange(ex_name, false);
 }
