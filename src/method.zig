@@ -17,6 +17,8 @@ pub const METHOD_CONNECTION_OPEN: u16 = 40;
 pub const METHOD_CONNECTION_OPEN_OK: u16 = 41;
 pub const METHOD_CONNECTION_CLOSE: u16 = 50;
 pub const METHOD_CONNECTION_CLOSE_OK: u16 = 51;
+pub const METHOD_CONNECTION_BLOCKED: u16 = 60;
+pub const METHOD_CONNECTION_UNBLOCKED: u16 = 61;
 
 pub const METHOD_CHANNEL_OPEN: u16 = 10;
 pub const METHOD_CHANNEL_OPEN_OK: u16 = 11;
@@ -40,7 +42,11 @@ pub const METHOD_BASIC_QOS_OK: u16 = 11;
 pub const METHOD_BASIC_CONSUME: u16 = 20;
 pub const METHOD_BASIC_CONSUME_OK: u16 = 21;
 pub const METHOD_BASIC_PUBLISH: u16 = 40;
+pub const METHOD_BASIC_RETURN: u16 = 50;
 pub const METHOD_BASIC_DELIVER: u16 = 60;
+pub const METHOD_BASIC_GET: u16 = 70;
+pub const METHOD_BASIC_GET_OK: u16 = 71;
+pub const METHOD_BASIC_GET_EMPTY: u16 = 72;
 pub const METHOD_BASIC_ACK: u16 = 80;
 pub const METHOD_BASIC_REJECT: u16 = 90;
 pub const METHOD_BASIC_NACK: u16 = 120;
@@ -100,6 +106,12 @@ pub const ConnectionClose = struct {
 };
 
 pub const ConnectionCloseOk = struct {};
+
+pub const ConnectionBlocked = struct {
+    reason: []const u8,
+};
+
+pub const ConnectionUnblocked = struct {};
 
 // --- Channel Methods ---
 
@@ -245,6 +257,31 @@ pub const BasicNack = struct {
     requeue: bool = true,
 };
 
+pub const BasicReturn = struct {
+    reply_code: u16,
+    reply_text: []const u8,
+    exchange: []const u8,
+    routing_key: []const u8,
+};
+
+pub const BasicGet = struct {
+    reserved_1: u16 = 0,
+    queue: []const u8,
+    no_ack: bool = false,
+};
+
+pub const BasicGetOk = struct {
+    delivery_tag: u64,
+    redelivered: bool,
+    exchange: []const u8,
+    routing_key: []const u8,
+    message_count: u32,
+};
+
+pub const BasicGetEmpty = struct {
+    reserved_1: []const u8 = "",
+};
+
 // --- Confirm Methods ---
 
 pub const ConfirmSelect = struct {
@@ -264,6 +301,8 @@ pub const Method = union(enum) {
     connection_open_ok: ConnectionOpenOk,
     connection_close: ConnectionClose,
     connection_close_ok: ConnectionCloseOk,
+    connection_blocked: ConnectionBlocked,
+    connection_unblocked: ConnectionUnblocked,
 
     channel_open: ChannelOpen,
     channel_open_ok: ChannelOpenOk,
@@ -287,7 +326,11 @@ pub const Method = union(enum) {
     basic_consume: BasicConsume,
     basic_consume_ok: BasicConsumeOk,
     basic_publish: BasicPublish,
+    basic_return: BasicReturn,
     basic_deliver: BasicDeliver,
+    basic_get: BasicGet,
+    basic_get_ok: BasicGetOk,
+    basic_get_empty: BasicGetEmpty,
     basic_ack: BasicAck,
     basic_reject: BasicReject,
     basic_nack: BasicNack,
@@ -361,6 +404,15 @@ pub fn encodeMethod(dest: []u8, method: Method) Error!usize {
         .connection_close_ok => {
             _ = try wire.writeU16(dest[0..2], CLASS_CONNECTION);
             _ = try wire.writeU16(dest[2..4], METHOD_CONNECTION_CLOSE_OK);
+        },
+        .connection_blocked => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_CONNECTION);
+            _ = try wire.writeU16(dest[2..4], METHOD_CONNECTION_BLOCKED);
+            cursor += try wire.writeShortString(dest[cursor..], m.reason);
+        },
+        .connection_unblocked => {
+            _ = try wire.writeU16(dest[0..2], CLASS_CONNECTION);
+            _ = try wire.writeU16(dest[2..4], METHOD_CONNECTION_UNBLOCKED);
         },
         .channel_open => |m| {
             _ = try wire.writeU16(dest[0..2], CLASS_CHANNEL);
@@ -518,6 +570,14 @@ pub fn encodeMethod(dest: []u8, method: Method) Error!usize {
             if (m.immediate) bits |= 1 << 1;
             cursor += try wire.writeU8(dest[cursor..], bits);
         },
+        .basic_return => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
+            _ = try wire.writeU16(dest[2..4], METHOD_BASIC_RETURN);
+            cursor += try wire.writeU16(dest[cursor..], m.reply_code);
+            cursor += try wire.writeShortString(dest[cursor..], m.reply_text);
+            cursor += try wire.writeShortString(dest[cursor..], m.exchange);
+            cursor += try wire.writeShortString(dest[cursor..], m.routing_key);
+        },
         .basic_deliver => |m| {
             _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
             _ = try wire.writeU16(dest[2..4], METHOD_BASIC_DELIVER);
@@ -527,6 +587,29 @@ pub fn encodeMethod(dest: []u8, method: Method) Error!usize {
             cursor += try wire.writeU8(dest[cursor..], bits);
             cursor += try wire.writeShortString(dest[cursor..], m.exchange);
             cursor += try wire.writeShortString(dest[cursor..], m.routing_key);
+        },
+        .basic_get => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
+            _ = try wire.writeU16(dest[2..4], METHOD_BASIC_GET);
+            cursor += try wire.writeU16(dest[cursor..], m.reserved_1);
+            cursor += try wire.writeShortString(dest[cursor..], m.queue);
+            const bits: u8 = if (m.no_ack) 1 else 0;
+            cursor += try wire.writeU8(dest[cursor..], bits);
+        },
+        .basic_get_ok => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
+            _ = try wire.writeU16(dest[2..4], METHOD_BASIC_GET_OK);
+            cursor += try wire.writeU64(dest[cursor..], m.delivery_tag);
+            const bits: u8 = if (m.redelivered) 1 else 0;
+            cursor += try wire.writeU8(dest[cursor..], bits);
+            cursor += try wire.writeShortString(dest[cursor..], m.exchange);
+            cursor += try wire.writeShortString(dest[cursor..], m.routing_key);
+            cursor += try wire.writeU32(dest[cursor..], m.message_count);
+        },
+        .basic_get_empty => |m| {
+            _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
+            _ = try wire.writeU16(dest[2..4], METHOD_BASIC_GET_EMPTY);
+            cursor += try wire.writeShortString(dest[cursor..], m.reserved_1);
         },
         .basic_ack => |m| {
             _ = try wire.writeU16(dest[0..2], CLASS_BASIC);
@@ -673,6 +756,13 @@ pub fn decodeMethod(bytes: []const u8) Error!Method {
             },
             METHOD_CONNECTION_CLOSE_OK => {
                 return .{ .connection_close_ok = .{} };
+            },
+            METHOD_CONNECTION_BLOCKED => {
+                const reason = try wire.readShortString(bytes[cursor..]);
+                return .{ .connection_blocked = .{ .reason = reason.str } };
+            },
+            METHOD_CONNECTION_UNBLOCKED => {
+                return .{ .connection_unblocked = .{} };
             },
             else => return Error.UnknownMethod,
         },
@@ -898,6 +988,21 @@ pub fn decodeMethod(bytes: []const u8) Error!Method {
                     .immediate = (bits & (1 << 1)) != 0,
                 } };
             },
+            METHOD_BASIC_RETURN => {
+                const code = try wire.readU16(bytes[cursor..]);
+                cursor += 2;
+                const text = try wire.readShortString(bytes[cursor..]);
+                cursor += text.consumed;
+                const ex = try wire.readShortString(bytes[cursor..]);
+                cursor += ex.consumed;
+                const rk = try wire.readShortString(bytes[cursor..]);
+                return .{ .basic_return = .{
+                    .reply_code = code,
+                    .reply_text = text.str,
+                    .exchange = ex.str,
+                    .routing_key = rk.str,
+                } };
+            },
             METHOD_BASIC_DELIVER => {
                 const ctag = try wire.readShortString(bytes[cursor..]);
                 cursor += ctag.consumed;
@@ -915,6 +1020,40 @@ pub fn decodeMethod(bytes: []const u8) Error!Method {
                     .exchange = ex.str,
                     .routing_key = rk.str,
                 } };
+            },
+            METHOD_BASIC_GET => {
+                const r1 = try wire.readU16(bytes[cursor..]);
+                cursor += 2;
+                const q = try wire.readShortString(bytes[cursor..]);
+                cursor += q.consumed;
+                const bits = try wire.readU8(bytes[cursor..]);
+                return .{ .basic_get = .{
+                    .reserved_1 = r1,
+                    .queue = q.str,
+                    .no_ack = (bits & 1) != 0,
+                } };
+            },
+            METHOD_BASIC_GET_OK => {
+                const dtag = try wire.readU64(bytes[cursor..]);
+                cursor += 8;
+                const bits = try wire.readU8(bytes[cursor..]);
+                cursor += 1;
+                const ex = try wire.readShortString(bytes[cursor..]);
+                cursor += ex.consumed;
+                const rk = try wire.readShortString(bytes[cursor..]);
+                cursor += rk.consumed;
+                const mc = try wire.readU32(bytes[cursor..]);
+                return .{ .basic_get_ok = .{
+                    .delivery_tag = dtag,
+                    .redelivered = (bits & 1) != 0,
+                    .exchange = ex.str,
+                    .routing_key = rk.str,
+                    .message_count = mc,
+                } };
+            },
+            METHOD_BASIC_GET_EMPTY => {
+                const r1 = try wire.readShortString(bytes[cursor..]);
+                return .{ .basic_get_empty = .{ .reserved_1 = r1.str } };
             },
             METHOD_BASIC_ACK => {
                 const dtag = try wire.readU64(bytes[cursor..]);
@@ -1277,6 +1416,82 @@ test "basic qos, consume, deliver and reject roundtrip" {
             try std.testing.expectEqual(@as(u64, 999), r.delivery_tag);
             try std.testing.expect(!r.requeue);
         },
+        else => return error.UnexpectedMethod,
+    }
+
+    // Basic.Return
+    const ret = Method{ .basic_return = .{
+        .reply_code = 312,
+        .reply_text = "NO_ROUTE",
+        .exchange = "ex1",
+        .routing_key = "rk1",
+    } };
+    const w_ret = try encodeMethod(&buf, ret);
+    const dec_ret = try decodeMethod(buf[0..w_ret]);
+    switch (dec_ret) {
+        .basic_return => |r| {
+            try std.testing.expectEqual(@as(u16, 312), r.reply_code);
+            try std.testing.expectEqualStrings("NO_ROUTE", r.reply_text);
+            try std.testing.expectEqualStrings("ex1", r.exchange);
+            try std.testing.expectEqualStrings("rk1", r.routing_key);
+        },
+        else => return error.UnexpectedMethod,
+    }
+
+    // Basic.Get & GetOk & GetEmpty
+    const get_m = Method{ .basic_get = .{ .queue = "q1", .no_ack = true } };
+    const w_g = try encodeMethod(&buf, get_m);
+    const dec_g = try decodeMethod(buf[0..w_g]);
+    switch (dec_g) {
+        .basic_get => |g| {
+            try std.testing.expectEqualStrings("q1", g.queue);
+            try std.testing.expect(g.no_ack);
+        },
+        else => return error.UnexpectedMethod,
+    }
+
+    const get_ok_m = Method{ .basic_get_ok = .{
+        .delivery_tag = 42,
+        .redelivered = false,
+        .exchange = "ex2",
+        .routing_key = "rk2",
+        .message_count = 5,
+    } };
+    const w_gok = try encodeMethod(&buf, get_ok_m);
+    const dec_gok = try decodeMethod(buf[0..w_gok]);
+    switch (dec_gok) {
+        .basic_get_ok => |gok| {
+            try std.testing.expectEqual(@as(u64, 42), gok.delivery_tag);
+            try std.testing.expect(!gok.redelivered);
+            try std.testing.expectEqualStrings("ex2", gok.exchange);
+            try std.testing.expectEqualStrings("rk2", gok.routing_key);
+            try std.testing.expectEqual(@as(u32, 5), gok.message_count);
+        },
+        else => return error.UnexpectedMethod,
+    }
+
+    const get_emp = Method{ .basic_get_empty = .{} };
+    const w_gemp = try encodeMethod(&buf, get_emp);
+    const dec_gemp = try decodeMethod(buf[0..w_gemp]);
+    switch (dec_gemp) {
+        .basic_get_empty => {},
+        else => return error.UnexpectedMethod,
+    }
+
+    // Connection.Blocked & Unblocked
+    const blocked_m = Method{ .connection_blocked = .{ .reason = "low memory" } };
+    const w_blk = try encodeMethod(&buf, blocked_m);
+    const dec_blk = try decodeMethod(buf[0..w_blk]);
+    switch (dec_blk) {
+        .connection_blocked => |b| try std.testing.expectEqualStrings("low memory", b.reason),
+        else => return error.UnexpectedMethod,
+    }
+
+    const unblk_m = Method{ .connection_unblocked = .{} };
+    const w_unblk = try encodeMethod(&buf, unblk_m);
+    const dec_unblk = try decodeMethod(buf[0..w_unblk]);
+    switch (dec_unblk) {
+        .connection_unblocked => {},
         else => return error.UnexpectedMethod,
     }
 }
