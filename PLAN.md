@@ -121,7 +121,44 @@ The implementation is broken into 8 sequential slices, each verified with unit t
 
 ---
 
-## 4. Quality Gates & Verification Checklist
+## 4. Phase 2: Specification Hardening (Tier 1 Additions)
+
+Based on the automated audit against the official OASIS AMQP 0-9-1 XML specification and RabbitMQ codegen schema, the following Tier 1 production features are added:
+
+### Slice 9: AMQP Reply Codes (`ReplyCode` Enum & Error Mapping)
+- Define `ReplyCode` enum covering all standard AMQP 0-9-1 reply codes:
+  - `reply_success = 200`
+  - `content_too_large = 311`, `no_route = 312`, `no_consumers = 313`
+  - `connection_forced = 320`, `invalid_path = 402`
+  - `access_refused = 403`, `not_found = 404`, `resource_locked = 405`, `precondition_failed = 406`
+  - `frame_error = 501`, `syntax_error = 502`, `command_invalid = 503`, `channel_error = 504`, `unexpected_frame = 505`, `resource_error = 506`
+  - `not_allowed = 530`, `not_implemented = 540`, `internal_error = 541`
+- Implement `isSoftError(code: ReplyCode) bool` and `isHardError(code: ReplyCode) bool`.
+- Add helper `description(code: ReplyCode) []const u8` for actionable diagnostic error messages.
+- Comprehensive unit tests.
+
+### Slice 10: Consumer Cancellation (`Basic.Cancel` & `Basic.CancelOk`)
+- Add `BasicCancel` and `BasicCancelOk` method structures (Method ID 30, 31).
+- Implement encoding, decoding, and dispatch for `Basic.Cancel` and `Basic.CancelOk`.
+- Implement `Channel.cancel(consumer_tag: []const u8) !void` for graceful consumer shutdown.
+- Support server-initiated `Basic.Cancel` notifications in the consumer message loop (e.g. queue deleted by broker admin).
+- Live broker integration tests.
+
+### Slice 11: Queue Unbinding (`Queue.Unbind` & `Queue.UnbindOk`)
+- Add `QueueUnbind` and `QueueUnbindOk` method structures (Method ID 50, 51).
+- Implement encoding and decoding for `Queue.Unbind` with arguments table support.
+- Implement `Channel.unbindQueue(queue, exchange, routing_key)` and `Channel.unbindQueueWithArgs(..., args)`.
+- Live broker integration tests.
+
+### Slice 12: Exchange Deletion (`Exchange.Delete` & `Exchange.DeleteOk`)
+- Add `ExchangeDelete` and `ExchangeDeleteOk` method structures (Method ID 20, 21).
+- Implement encoding and decoding with `if_unused` safety flag.
+- Implement `Channel.deleteExchange(exchange: []const u8, if_unused: bool) !void`.
+- Live broker integration tests.
+
+---
+
+## 5. Quality Gates & Verification Checklist
 
 Every slice must satisfy:
 1. `zig build test`: 100% of unit tests pass with zero memory leaks.
