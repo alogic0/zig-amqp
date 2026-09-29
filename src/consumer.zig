@@ -118,7 +118,15 @@ pub fn readMessage(channel: *channel_mod.Channel, allocator: std.mem.Allocator) 
         }
     }
 
-    // 2. Await Content Header frame
+    try reassembleContent(channel, allocator, &msg);
+    return msg;
+}
+
+pub fn reassembleContent(channel: *channel_mod.Channel, allocator: std.mem.Allocator, msg: *Message) !void {
+    const tr = if (channel.connection.transport) |*t| t else return Error.ConnectionClosed;
+    var payload_buf: [4096]u8 = undefined;
+
+    // 1. Await Content Header frame
     while (true) {
         const header_frame = try tr.readFrame(&payload_buf);
         if (header_frame.frame_type == .heartbeat) continue;
@@ -135,7 +143,7 @@ pub fn readMessage(channel: *channel_mod.Channel, allocator: std.mem.Allocator) 
     msg.properties = content_hdr.properties;
     const body_len: usize = @intCast(content_hdr.body_size);
 
-    // 3. Await Content Body frame(s) until total received == body_size
+    // 2. Await Content Body frame(s) until total received == body_size
     if (body_len > 0) {
         const body = try allocator.alloc(u8, body_len);
         errdefer allocator.free(body);
@@ -152,8 +160,6 @@ pub fn readMessage(channel: *channel_mod.Channel, allocator: std.mem.Allocator) 
         msg.body = body;
         msg.owned = true;
     }
-
-    return msg;
 }
 
 test "consumer receive, parse and ack against live rabbitmq" {

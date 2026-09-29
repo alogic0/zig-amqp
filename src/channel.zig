@@ -430,6 +430,58 @@ pub const Channel = struct {
         }
     }
 
+    /// Performs a polling poll (`Basic.Get`) on a queue.
+    /// Returns the message if one was available, or `null` if the queue was empty.
+    pub fn get(self: *Channel, allocator: std.mem.Allocator, queue: []const u8, no_ack: bool) !?consumer_mod.Message {
+        if (self.state != .open) return Error.ChannelClosed;
+
+        const get_m = method.Method{
+            .basic_get = .{
+                .reserved_1 = 0,
+                .queue = queue,
+                .no_ack = no_ack,
+            },
+        };
+        try self.connection.sendMethod(self.id, get_m);
+
+        var payload_buf: [4096]u8 = undefined;
+        while (true) {
+            const f = try self.connection.transport.?.readFrame(&payload_buf);
+            if (f.frame_type == .heartbeat) continue;
+            if (f.frame_type != .method) continue;
+            if (f.channel != self.id) continue;
+
+            const m = try method.decodeMethod(f.payload);
+            switch (m) {
+                .basic_get_empty => return null,
+                .basic_get_ok => |ok| {
+                    var msg = consumer_mod.Message{
+                        .channel = self,
+                        .delivery_tag = ok.delivery_tag,
+                        .redelivered = ok.redelivered,
+                        .body = &.{},
+                    };
+
+                    if (ok.exchange.len > msg.exchange_buf.len) return Error.ProtocolViolation;
+                    @memcpy(msg.exchange_buf[0..ok.exchange.len], ok.exchange);
+                    msg.exchange_len = @intCast(ok.exchange.len);
+
+                    if (ok.routing_key.len > msg.routing_key_buf.len) return Error.ProtocolViolation;
+                    @memcpy(msg.routing_key_buf[0..ok.routing_key.len], ok.routing_key);
+                    msg.routing_key_len = @intCast(ok.routing_key.len);
+
+                    try consumer_mod.reassembleContent(self, allocator, &msg);
+                    return msg;
+                },
+                .channel_close => {
+                    self.state = .closed;
+                    return Error.BrokerError;
+                },
+                else => return Error.UnexpectedMethod,
+            }
+        }
+    }
+
     /// Reads and reassembles the next incoming message delivered to this channel.
     pub fn readMessage(self: *Channel, allocator: std.mem.Allocator) !consumer_mod.Message {
         return consumer_mod.readMessage(self, allocator);
@@ -622,4 +674,44 @@ test "queue declare with broker arguments against live rabbitmq" {
     const q_name = "zg.test.get_args_queue";
     const ok = try ch.declareQueueWithArgs(q_name, false, false, true, &args);
     try std.testing.expectEqualStrings(q_name, ok.queue);
+}
+
+test "basic get polling consumption against live rabbitmq" {
+    const config = connection_mod.ConnectionConfig{
+        .host = "127.0.0.1",
+        .port = 5674,
+        .username = "guest",
+        .password = "guest",
+        .virtual_host = "/",
+    };
+    var conn = connection_mod.Connection.init(std.testing.allocator, std.testing.io, config);
+    defer conn.deinit();
+
+    conn.connect() catch |err| {
+        if (err == error.ConnectionRefused or err == error.ConnectionFailed) return;
+        return err;
+    };
+    defer conn.close() catch {};
+
+    var ch = try conn.openChannel(4);
+    defer ch.close() catch {};
+
+    const q_name = "zg.test.polling_get_queue";
+    _ = try ch.declareQueue(q_name, false, false, true);
+
+    // 1. Initial queue poll returns null (Basic.GetEmpty)
+    const empty_msg = try ch.get(std.testing.allocator, q_name, true);
+    try std.testing.expect(empty_msg == null);
+
+    // 2. Publish message
+    const test_payload = "polling message payload";
+    try ch.publish("", q_name, test_payload, .{}, false);
+
+    // 3. Poll receives message (Basic.GetOk)
+    var opt_msg = try ch.get(std.testing.allocator, q_name, true);
+    try std.testing.expect(opt_msg != null);
+    if (opt_msg) |*msg| {
+        defer msg.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings(test_payload, msg.body);
+    }
 }
