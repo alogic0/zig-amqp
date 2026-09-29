@@ -18,4 +18,24 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run library unit tests");
     test_step.dependOn(&run_main_tests.step);
+
+    // Examples
+    const examples = [_][]const u8{ "publisher", "consumer", "confirms" };
+    inline for (examples) |name| {
+        const exe_mod = b.createModule(.{
+            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{name})),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe_mod.addImport("amqp", amqp_mod);
+
+        const exe = b.addExecutable(.{
+            .name = name,
+            .root_module = exe_mod,
+        });
+
+        const run_cmd = b.addRunArtifact(exe);
+        const run_step = b.step(b.fmt("run-{s}", .{name}), b.fmt("Run the {s} example", .{name}));
+        run_step.dependOn(&run_cmd.step);
+    }
 }
