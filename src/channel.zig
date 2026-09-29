@@ -19,12 +19,17 @@ pub const Error = error{
     UnexpectedMethod,
     ProtocolViolation,
     BrokerError,
+    ConfirmsNotEnabled,
+    MessageNacked,
 } || connection_mod.Error;
 
 pub const Channel = struct {
     id: u16,
     connection: *connection_mod.Connection,
     state: ChannelState = .closed,
+    confirms_enabled: bool = false,
+    next_publish_seq: u64 = 1,
+    last_acked_seq: u64 = 0,
 
     pub fn open(self: *Channel) !void {
         if (self.state == .open) return;
@@ -230,6 +235,92 @@ pub const Channel = struct {
                 offset += chunk_len;
             }
         }
+
+        if (self.confirms_enabled) {
+            self.next_publish_seq += 1;
+        }
+    }
+
+    /// Activates publisher confirms on this channel (Confirm.Select).
+    pub fn enableConfirms(self: *Channel) !void {
+        if (self.state != .open) return Error.ChannelClosed;
+        if (self.confirms_enabled) return;
+
+        const select_m = method.Method{
+            .confirm_select = .{ .nowait = false },
+        };
+        try self.connection.sendMethod(self.id, select_m);
+
+        var payload_buf: [512]u8 = undefined;
+        const resp = try self.connection.readMethod(&payload_buf);
+        if (resp.channel != self.id) return Error.ProtocolViolation;
+
+        switch (resp.method) {
+            .confirm_select_ok => {
+                self.confirms_enabled = true;
+                self.next_publish_seq = 1;
+                self.last_acked_seq = 0;
+            },
+            .channel_close => {
+                self.state = .closed;
+                return Error.BrokerError;
+            },
+            else => return Error.UnexpectedMethod,
+        }
+    }
+
+    /// Publishes a message and synchronously awaits broker acknowledgment (Basic.Ack).
+    pub fn publishConfirm(
+        self: *Channel,
+        exchange: []const u8,
+        routing_key: []const u8,
+        body: []const u8,
+        props: properties.BasicProperties,
+        mandatory: bool,
+    ) !void {
+        if (!self.confirms_enabled) return Error.ConfirmsNotEnabled;
+        const tag = self.next_publish_seq;
+
+        try self.publish(exchange, routing_key, body, props, mandatory);
+
+        var payload_buf: [1024]u8 = undefined;
+        while (true) {
+            const tr = if (self.connection.transport) |*t| t else return Error.ConnectionClosed;
+            const f = try tr.readFrame(&payload_buf);
+            if (f.frame_type == .heartbeat) {
+                continue;
+            }
+            if (f.frame_type == .method and f.channel == self.id) {
+                const m = try method.decodeMethod(f.payload);
+                switch (m) {
+                    .basic_ack => |ack| {
+                        if (ack.multiple) {
+                            if (tag <= ack.delivery_tag) {
+                                self.last_acked_seq = ack.delivery_tag;
+                                return;
+                            }
+                        } else {
+                            if (ack.delivery_tag == tag) {
+                                self.last_acked_seq = tag;
+                                return;
+                            }
+                        }
+                    },
+                    .basic_nack => |nack| {
+                        if (nack.multiple) {
+                            if (tag <= nack.delivery_tag) return Error.MessageNacked;
+                        } else {
+                            if (nack.delivery_tag == tag) return Error.MessageNacked;
+                        }
+                    },
+                    .channel_close => {
+                        self.state = .closed;
+                        return Error.BrokerError;
+                    },
+                    else => {},
+                }
+            }
+        }
     }
 
     pub fn close(self: *Channel) !void {
@@ -306,6 +397,51 @@ test "channel operations and publishing against live rabbitmq" {
     try ch.publish("zg.test.exchange", "zg.test.routing_key", &large_payload, props, false);
 
     // 7. Close Channel
+    try ch.close();
+    try std.testing.expectEqual(ChannelState.closed, ch.state);
+}
+
+test "publisher confirms against live rabbitmq" {
+    const config = connection_mod.ConnectionConfig{
+        .host = "127.0.0.1",
+        .port = 5674,
+        .username = "guest",
+        .password = "guest",
+        .virtual_host = "/",
+    };
+    var conn = connection_mod.Connection.init(std.testing.allocator, std.testing.io, config);
+    defer conn.deinit();
+
+    conn.connect() catch |err| {
+        if (err == error.ConnectionRefused or err == error.ConnectionFailed) return;
+        return err;
+    };
+    defer conn.close() catch {};
+
+    var ch = try conn.openChannel(2);
+    try std.testing.expectEqual(ChannelState.open, ch.state);
+
+    // 1. Enable Confirms
+    try ch.enableConfirms();
+    try std.testing.expect(ch.confirms_enabled);
+
+    // 2. Declare queue
+    _ = try ch.declareQueue("zg.test.confirms_queue", false, false, true);
+
+    // 3. Publish and wait for ACK
+    const payload1 = "{\"event\": \"lead_confirmed_1\"}";
+    const props = properties.BasicProperties{
+        .content_type = "application/json",
+        .delivery_mode = @intFromEnum(properties.DeliveryMode.persistent),
+    };
+    try ch.publishConfirm("", "zg.test.confirms_queue", payload1, props, false);
+    try std.testing.expect(ch.last_acked_seq >= 1);
+
+    // 4. Publish second message and wait for ACK
+    const payload2 = "{\"event\": \"lead_confirmed_2\"}";
+    try ch.publishConfirm("", "zg.test.confirms_queue", payload2, props, false);
+    try std.testing.expect(ch.last_acked_seq >= 2);
+
     try ch.close();
     try std.testing.expectEqual(ChannelState.closed, ch.state);
 }
