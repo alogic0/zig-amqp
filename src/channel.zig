@@ -32,6 +32,12 @@ pub const Channel = struct {
     next_publish_seq: u64 = 1,
     last_acked_seq: u64 = 0,
 
+    fn handleChannelClose(self: *Channel) Error {
+        self.state = .closed;
+        self.connection.sendMethod(self.id, .{ .channel_close_ok = .{} }) catch {};
+        return Error.BrokerError;
+    }
+
     pub fn open(self: *Channel) !void {
         if (self.state == .open) return;
         if (self.connection.state != .open) return Error.ConnectionClosed;
@@ -54,11 +60,7 @@ pub const Channel = struct {
             .channel_open_ok => {
                 self.state = .open;
             },
-            .channel_close => |cc| {
-                self.state = .closed;
-                _ = cc;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -90,10 +92,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .queue_declare_ok => |ok| return ok,
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -131,10 +130,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .queue_declare_ok => |ok| return ok,
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -177,10 +173,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .queue_bind_ok => {},
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -222,10 +215,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .queue_unbind_ok => {},
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -271,10 +261,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .exchange_declare_ok => {},
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -297,10 +284,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .exchange_delete_ok => {},
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -323,10 +307,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .basic_qos_ok => {},
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -359,8 +340,33 @@ pub const Channel = struct {
 
         // 2. Send Content Header frame
         var header_buf: [2048]u8 = undefined;
-        const header_len = try properties.encodeContentHeader(&header_buf, properties.CLASS_BASIC, body.len, props);
-        try tr.sendFrame(.header, self.id, header_buf[0..header_len]);
+        if (properties.encodeContentHeader(&header_buf, properties.CLASS_BASIC, body.len, props)) |header_len| {
+            try tr.sendFrame(.header, self.id, header_buf[0..header_len]);
+        } else |err| switch (err) {
+            error.BufferTooSmall => {
+                var needed: usize = 14;
+                if (props.content_type) |ct| needed += 1 + ct.len;
+                if (props.content_encoding) |ce| needed += 1 + ce.len;
+                if (props.headers) |h| needed += h.len;
+                if (props.delivery_mode != null) needed += 1;
+                if (props.priority != null) needed += 1;
+                if (props.correlation_id) |c| needed += 1 + c.len;
+                if (props.reply_to) |r| needed += 1 + r.len;
+                if (props.expiration) |e| needed += 1 + e.len;
+                if (props.message_id) |m| needed += 1 + m.len;
+                if (props.timestamp != null) needed += 8;
+                if (props.type_name) |t| needed += 1 + t.len;
+                if (props.user_id) |u| needed += 1 + u.len;
+                if (props.app_id) |a| needed += 1 + a.len;
+                if (props.cluster_id) |c| needed += 1 + c.len;
+
+                const heap_buf = try self.connection.allocator.alloc(u8, needed);
+                defer self.connection.allocator.free(heap_buf);
+                const header_len = try properties.encodeContentHeader(heap_buf, properties.CLASS_BASIC, body.len, props);
+                try tr.sendFrame(.header, self.id, heap_buf[0..header_len]);
+            },
+            else => return err,
+        }
 
         // 3. Send Content Body frame(s)
         if (body.len > 0) {
@@ -404,10 +410,7 @@ pub const Channel = struct {
                 self.next_publish_seq = 1;
                 self.last_acked_seq = 0;
             },
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -456,10 +459,7 @@ pub const Channel = struct {
                             if (n.delivery_tag == tag) return Error.MessageNacked;
                         }
                     },
-                    .channel_close => {
-                        self.state = .closed;
-                        return Error.BrokerError;
-                    },
+                    .channel_close => return self.handleChannelClose(),
                     else => {},
                 }
             }
@@ -493,10 +493,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .basic_consume_ok => {},
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -519,10 +516,7 @@ pub const Channel = struct {
 
         switch (resp.method) {
             .basic_cancel_ok => {},
-            .channel_close => {
-                self.state = .closed;
-                return Error.BrokerError;
-            },
+            .channel_close => return self.handleChannelClose(),
             else => return Error.UnexpectedMethod,
         }
     }
@@ -558,6 +552,7 @@ pub const Channel = struct {
                         .redelivered = ok.redelivered,
                         .body = &.{},
                     };
+                    errdefer msg.deinit(allocator);
 
                     if (ok.exchange.len > msg.exchange_buf.len) return Error.ProtocolViolation;
                     @memcpy(msg.exchange_buf[0..ok.exchange.len], ok.exchange);
@@ -570,10 +565,7 @@ pub const Channel = struct {
                     try consumer_mod.reassembleContent(self, allocator, &msg);
                     return msg;
                 },
-                .channel_close => {
-                    self.state = .closed;
-                    return Error.BrokerError;
-                },
+                .channel_close => return self.handleChannelClose(),
                 else => return Error.UnexpectedMethod,
             }
         }
@@ -684,7 +676,7 @@ test "channel operations and publishing against live rabbitmq" {
     const small_payload = "{\"event\": \"lead_received\", \"id\": 1001}";
     const props = properties.BasicProperties{
         .content_type = "application/json",
-        .delivery_mode = @intFromEnum(properties.DeliveryMode.persistent),
+        .delivery_mode = @backingInt(properties.DeliveryMode.persistent),
         .correlation_id = "corr-test-1",
     };
     try ch.publish("zg.test.exchange", "zg.test.routing_key", small_payload, props, false);
@@ -730,7 +722,7 @@ test "publisher confirms against live rabbitmq" {
     const payload1 = "{\"event\": \"lead_confirmed_1\"}";
     const props = properties.BasicProperties{
         .content_type = "application/json",
-        .delivery_mode = @intFromEnum(properties.DeliveryMode.persistent),
+        .delivery_mode = @backingInt(properties.DeliveryMode.persistent),
     };
     try ch.publishConfirm("", "zg.test.confirms_queue", payload1, props, false);
     try std.testing.expect(ch.last_acked_seq >= 1);

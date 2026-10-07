@@ -91,7 +91,7 @@ pub fn writeFrame(dest: []u8, frame_type: FrameType, channel: u16, payload: []co
     if (dest.len < total_size) return Error.BufferTooSmall;
     if (payload.len > std.math.maxInt(u32)) return Error.PayloadTooLarge;
 
-    dest[0] = @intFromEnum(frame_type);
+    dest[0] = @backingInt(frame_type);
     std.mem.writeInt(u16, dest[1..3], channel, .big);
     std.mem.writeInt(u32, dest[3..7], @intCast(payload.len), .big);
     if (payload.len > 0) {
@@ -106,8 +106,8 @@ pub fn writeHeartbeat(dest: []u8) Error!usize {
     return writeFrame(dest, .heartbeat, 0, &.{});
 }
 
-/// Reads a frame from any stream/reader into a caller-supplied payload buffer.
-pub fn readFrameFromReader(reader: anytype, dest_payload: []u8) !Frame {
+/// Reads only the 7-byte frame header from reader.
+pub fn readFrameHeaderFromReader(reader: anytype) !FrameHeader {
     var hdr_buf: [HEADER_SIZE]u8 = undefined;
     const T = @TypeOf(reader);
     const P = if (@typeInfo(T) == .pointer) @typeInfo(T).pointer.child else T;
@@ -120,10 +120,15 @@ pub fn readFrameFromReader(reader: anytype, dest_payload: []u8) !Frame {
         @compileError("Unsupported reader type");
     }
 
-    const hdr = try parseFrameHeader(&hdr_buf);
-    if (dest_payload.len < hdr.length) return Error.BufferTooSmall;
-    const payload = dest_payload[0..hdr.length];
-    if (hdr.length > 0) {
+    return parseFrameHeader(&hdr_buf);
+}
+
+/// Reads the payload and validates the trailing FRAME_END byte from reader.
+pub fn readFramePayloadAndEnd(reader: anytype, payload: []u8) !void {
+    const T = @TypeOf(reader);
+    const P = if (@typeInfo(T) == .pointer) @typeInfo(T).pointer.child else T;
+
+    if (payload.len > 0) {
         if (@hasDecl(P, "readSliceAll")) {
             try reader.readSliceAll(payload);
         } else {
@@ -137,6 +142,14 @@ pub fn readFrameFromReader(reader: anytype, dest_payload: []u8) !Frame {
         try reader.readByte();
 
     if (end_byte != FRAME_END) return Error.InvalidFrameEnd;
+}
+
+/// Reads a frame from any stream/reader into a caller-supplied payload buffer.
+pub fn readFrameFromReader(reader: anytype, dest_payload: []u8) !Frame {
+    const hdr = try readFrameHeaderFromReader(reader);
+    if (dest_payload.len < hdr.length) return Error.BufferTooSmall;
+    const payload = dest_payload[0..hdr.length];
+    try readFramePayloadAndEnd(reader, payload);
     return Frame{
         .frame_type = hdr.frame_type,
         .channel = hdr.channel,

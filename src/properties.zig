@@ -235,7 +235,7 @@ test "content header encode and decode roundtrip" {
         .content_type = "application/json",
         .content_encoding = "utf-8",
         .headers = table_buf[0..tlen],
-        .delivery_mode = @intFromEnum(DeliveryMode.persistent),
+        .delivery_mode = @backingInt(DeliveryMode.persistent),
         .priority = 5,
         .correlation_id = "corr-12345",
         .reply_to = "zg.responses",

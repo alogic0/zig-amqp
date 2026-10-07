@@ -198,7 +198,7 @@ pub const ConnectionClose = struct {
     method_id: u16 = 0,
 
     pub fn code(self: ConnectionClose) ReplyCode {
-        return @enumFromInt(self.reply_code);
+        return @fromBackingInt(@intCast(self.reply_code));
     }
 };
 
@@ -227,7 +227,7 @@ pub const ChannelClose = struct {
     method_id: u16 = 0,
 
     pub fn code(self: ChannelClose) ReplyCode {
-        return @enumFromInt(self.reply_code);
+        return @fromBackingInt(@intCast(self.reply_code));
     }
 };
 
@@ -393,7 +393,7 @@ pub const BasicReturn = struct {
     routing_key: []const u8,
 
     pub fn code(self: BasicReturn) ReplyCode {
-        return @enumFromInt(self.reply_code);
+        return @fromBackingInt(@intCast(self.reply_code));
     }
 };
 
@@ -1800,23 +1800,23 @@ test "basic qos, consume, deliver and reject roundtrip" {
 test "AMQP reply codes and error classifications" {
     // 1. Success code
     const success = ReplyCode.reply_success;
-    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(success));
+    try std.testing.expectEqual(@as(u16, 200), @backingInt(success));
     try std.testing.expect(!success.isSoftError());
     try std.testing.expect(!success.isHardError());
 
     // 2. Soft errors
     const not_found = ReplyCode.not_found;
-    try std.testing.expectEqual(@as(u16, 404), @intFromEnum(not_found));
+    try std.testing.expectEqual(@as(u16, 404), @backingInt(not_found));
     try std.testing.expect(not_found.isSoftError());
     try std.testing.expect(!not_found.isHardError());
 
     const precon = ReplyCode.precondition_failed;
-    try std.testing.expectEqual(@as(u16, 406), @intFromEnum(precon));
+    try std.testing.expectEqual(@as(u16, 406), @backingInt(precon));
     try std.testing.expect(precon.isSoftError());
 
     // 3. Hard errors
     const forced = ReplyCode.connection_forced;
-    try std.testing.expectEqual(@as(u16, 320), @intFromEnum(forced));
+    try std.testing.expectEqual(@as(u16, 320), @backingInt(forced));
     try std.testing.expect(!forced.isSoftError());
     try std.testing.expect(forced.isHardError());
 

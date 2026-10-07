@@ -6,8 +6,6 @@ const method = @import("method.zig");
 const properties = @import("properties.zig");
 const channel_mod = @import("channel.zig");
 
-pub const MAX_HEADER_BUF: usize = 2048;
-
 pub const Error = error{
     UnexpectedFrameType,
     UnexpectedMethod,
@@ -33,8 +31,7 @@ pub const Message = struct {
     routing_key_buf: [256]u8 = undefined,
     routing_key_len: u8 = 0,
 
-    header_buf: [MAX_HEADER_BUF]u8 = undefined,
-    header_buf_len: usize = 0,
+    header_raw: ?[]u8 = null,
     properties: properties.BasicProperties = .{},
 
     body: []const u8,
@@ -65,9 +62,14 @@ pub const Message = struct {
     }
 
     pub fn deinit(self: *Message, allocator: std.mem.Allocator) void {
+        if (self.header_raw) |h| {
+            allocator.free(h);
+            self.header_raw = null;
+        }
         if (self.owned and self.body.len > 0) {
             allocator.free(self.body);
             self.owned = false;
+            self.body = &.{};
         }
     }
 };
@@ -84,6 +86,7 @@ pub fn readMessage(channel: *channel_mod.Channel, allocator: std.mem.Allocator) 
         .redelivered = false,
         .body = &.{},
     };
+    errdefer msg.deinit(allocator);
 
     // 1. Await Basic.Deliver method frame on this channel
     while (true) {
@@ -113,6 +116,7 @@ pub fn readMessage(channel: *channel_mod.Channel, allocator: std.mem.Allocator) 
             },
             .channel_close => {
                 channel.state = .closed;
+                channel.connection.sendMethod(channel.id, .{ .channel_close_ok = .{} }) catch {};
                 return Error.ChannelClosed;
             },
             .basic_cancel => return Error.ConsumerCancelled,
@@ -126,22 +130,29 @@ pub fn readMessage(channel: *channel_mod.Channel, allocator: std.mem.Allocator) 
 
 pub fn reassembleContent(channel: *channel_mod.Channel, allocator: std.mem.Allocator, msg: *Message) !void {
     const tr = if (channel.connection.transport) |*t| t else return Error.ConnectionClosed;
-    var payload_buf: [4096]u8 = undefined;
 
     // 1. Await Content Header frame
     while (true) {
-        const header_frame = try tr.readFrame(&payload_buf);
-        if (header_frame.frame_type == .heartbeat) continue;
-        if (header_frame.frame_type == .header and header_frame.channel == channel.id) {
-            if (header_frame.payload.len > msg.header_buf.len) return Error.BufferTooSmall;
-            @memcpy(msg.header_buf[0..header_frame.payload.len], header_frame.payload);
-            msg.header_buf_len = header_frame.payload.len;
+        const hdr = try frame.readFrameHeaderFromReader(tr.reader());
+        if (hdr.frame_type == .heartbeat) {
+            const end_byte = if (@hasDecl(@TypeOf(tr.reader().*), "takeByte"))
+                try tr.reader().takeByte()
+            else
+                try tr.reader().readByte();
+            if (end_byte != frame.FRAME_END) return frame.Error.InvalidFrameEnd;
+            continue;
+        }
+        if (hdr.frame_type == .header and hdr.channel == channel.id) {
+            const header_bytes = try allocator.alloc(u8, hdr.length);
+            errdefer allocator.free(header_bytes);
+            try frame.readFramePayloadAndEnd(tr.reader(), header_bytes);
+            msg.header_raw = header_bytes;
             break;
         }
         return Error.UnexpectedFrameType;
     }
 
-    const content_hdr = try properties.decodeContentHeader(msg.header_buf[0..msg.header_buf_len]);
+    const content_hdr = try properties.decodeContentHeader(msg.header_raw.?);
     msg.properties = content_hdr.properties;
     const body_len: usize = @intCast(content_hdr.body_size);
 
@@ -152,12 +163,22 @@ pub fn reassembleContent(channel: *channel_mod.Channel, allocator: std.mem.Alloc
 
         var received: usize = 0;
         while (received < body_len) {
-            const body_frame = try tr.readFrame(body[received..]);
-            if (body_frame.frame_type == .heartbeat) continue;
-            if (body_frame.frame_type != .body or body_frame.channel != channel.id) {
+            const hdr = try frame.readFrameHeaderFromReader(tr.reader());
+            if (hdr.frame_type == .heartbeat) {
+                const end_byte = if (@hasDecl(@TypeOf(tr.reader().*), "takeByte"))
+                    try tr.reader().takeByte()
+                else
+                    try tr.reader().readByte();
+                if (end_byte != frame.FRAME_END) return frame.Error.InvalidFrameEnd;
+                continue;
+            }
+            if (hdr.frame_type != .body or hdr.channel != channel.id) {
                 return Error.UnexpectedFrameType;
             }
-            received += body_frame.payload.len;
+            const chunk_len: usize = @intCast(hdr.length);
+            if (received + chunk_len > body_len) return Error.IncompleteMessageBody;
+            try frame.readFramePayloadAndEnd(tr.reader(), body[received .. received + chunk_len]);
+            received += chunk_len;
         }
         msg.body = body;
         msg.owned = true;
@@ -197,7 +218,7 @@ test "consumer receive, parse and ack against live rabbitmq" {
     const send_props = properties.BasicProperties{
         .content_type = "application/json",
         .correlation_id = "corr-cons-test",
-        .delivery_mode = @intFromEnum(properties.DeliveryMode.persistent),
+        .delivery_mode = @backingInt(properties.DeliveryMode.persistent),
     };
     try ch.publish("", "zg.test.consume_pipeline", send_body, send_props, false);
 
@@ -212,5 +233,57 @@ test "consumer receive, parse and ack against live rabbitmq" {
     try std.testing.expectEqualStrings("corr-cons-test", msg.properties.correlation_id.?);
 
     // 5. Acknowledge message
+    try msg.ack(false);
+}
+
+test "consumer large headers exceeding stack limits against live rabbitmq" {
+    const connection_mod = @import("connection.zig");
+
+    const config = connection_mod.ConnectionConfig{
+        .host = "127.0.0.1",
+        .port = 5674,
+        .username = "guest",
+        .password = "guest",
+        .virtual_host = "/",
+    };
+    var conn = connection_mod.Connection.init(std.testing.allocator, std.testing.io, config);
+    defer conn.deinit();
+
+    conn.connect() catch |err| {
+        if (err == error.ConnectionRefused or err == error.ConnectionFailed) return;
+        return err;
+    };
+    defer conn.close() catch {};
+
+    var ch = try conn.openChannel(6);
+    defer ch.close() catch {};
+
+    _ = try ch.declareQueue("zg.test.large_headers_q", false, false, true);
+    try ch.consume("zg.test.large_headers_q", "large_cons", false);
+
+    // Create a large table > 2500 bytes
+    var table_buf: [3500]u8 = undefined;
+    var padding: [2600]u8 = undefined;
+    @memset(&padding, 'x');
+
+    const entries = [_]wire.FieldEntry{
+        .{ .name = "x-large-payload", .value = .{ .string = &padding } },
+    };
+    const tlen = try wire.writeTable(&table_buf, &entries);
+
+    const send_body = "large header test body";
+    const send_props = properties.BasicProperties{
+        .content_type = "application/octet-stream",
+        .headers = table_buf[0..tlen],
+    };
+    try ch.publish("", "zg.test.large_headers_q", send_body, send_props, false);
+
+    var msg = try ch.readMessage(std.testing.allocator);
+    defer msg.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(send_body, msg.body);
+    try std.testing.expectEqualStrings("application/octet-stream", msg.properties.content_type.?);
+    try std.testing.expect(msg.properties.headers.?.len > 2500);
+
     try msg.ack(false);
 }

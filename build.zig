@@ -19,7 +19,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run library unit tests");
     test_step.dependOn(&run_main_tests.step);
 
+    const check_step = b.step("check", "Check compilation without running tests");
+    check_step.dependOn(&main_tests.step);
+
     // Examples
+    const build_examples = b.option(bool, "examples", "Build and install example executables") orelse true;
+
     const examples = [_][]const u8{ "publisher", "consumer", "confirms" };
     inline for (examples) |name| {
         const exe_mod = b.createModule(.{
@@ -33,7 +38,9 @@ pub fn build(b: *std.Build) void {
             .name = name,
             .root_module = exe_mod,
         });
-        b.installArtifact(exe);
+        if (build_examples) {
+            b.installArtifact(exe);
+        }
 
         const run_cmd = b.addRunArtifact(exe);
         const run_step = b.step(b.fmt("run-{s}", .{name}), b.fmt("Run the {s} example", .{name}));

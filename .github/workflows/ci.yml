@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:3-management-alpine
+        ports:
+          - 5674:5672
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: master
+
+      - name: Check formatting
+        run: zig fmt --check src/ examples/ build.zig build.zig.zon
+
+      - name: Check compilation
+        run: zig build check
+
+      - name: Build library and examples
+        run: zig build --summary all
+
+      - name: Run test suite
+        run: zig build test --summary all
+
+      - name: Run example publisher
+        run: zig build run-publisher
+
+      - name: Run example consumer
+        run: zig build run-consumer
+
+      - name: Run example confirms
+        run: zig build run-confirms

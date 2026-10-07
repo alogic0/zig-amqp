@@ -46,7 +46,15 @@ A production-hardened, pure-Zig implementation of the AMQP 0-9-1 specification w
 
 ## Quickstart
 
-### 1. Adding to `build.zig.zon`
+### 1. Adding as a Dependency
+
+Add `zig-amqp` to your project using the Zig package manager:
+
+```bash
+zig fetch --save git+https://github.com/alogic0/zig-amqp
+```
+
+Or manually in your `build.zig.zon`:
 
 ```zig
 .{
@@ -54,7 +62,8 @@ A production-hardened, pure-Zig implementation of the AMQP 0-9-1 specification w
     .version = "1.0.0",
     .dependencies = .{
         .amqp = .{
-            .path = "path/to/zig-amqp",
+            .url = "git+https://github.com/alogic0/zig-amqp#main",
+            .hash = "...",
         },
     },
 }
@@ -180,4 +189,10 @@ Run the full unit and integration test suite:
 zig build test --summary all
 ```
 
-All 31 tests execute with 100% pass rate, zero memory leaks, and verify protocol framing, table codecs, TLS transport, publisher confirms, consumer frame reassembly, URI parsing, background heartbeats, queue arguments, queue unbinding, consumer cancellation, exchange deletion, and live RabbitMQ handshakes.
+All 32 tests execute with 100% pass rate, zero memory leaks, and verify protocol framing, table codecs, TLS transport, publisher confirms, consumer frame reassembly, URI parsing, background heartbeats, queue arguments, queue unbinding, consumer cancellation, exchange deletion, large header payloads exceeding stack boundaries, and live RabbitMQ handshakes.
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.

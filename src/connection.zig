@@ -293,16 +293,24 @@ pub const Connection = struct {
         try self.transport.?.sendFrame(.method, channel_id, method_buf[0..written]);
     }
 
-    /// Reads the next frame and decodes it as an AMQP method.
+    /// Reads the next frame and decodes it as an AMQP method, skipping heartbeats.
     pub fn readMethod(self: *Connection, dest_payload: []u8) !struct { channel: u16, method: method.Method } {
         if (self.transport == null) return Error.ConnectionClosed;
-        const f = try self.transport.?.readFrame(dest_payload);
-        if (f.frame_type != .method) return Error.UnexpectedFrameType;
-        const m = try method.decodeMethod(f.payload);
-        return .{
-            .channel = f.channel,
-            .method = m,
-        };
+        while (true) {
+            const f = try self.transport.?.readFrame(dest_payload);
+            if (f.frame_type == .heartbeat) continue;
+            if (f.frame_type != .method) return Error.UnexpectedFrameType;
+            const m = try method.decodeMethod(f.payload);
+            if (m == .connection_close) {
+                self.state = .closed;
+                self.sendMethod(0, .{ .connection_close_ok = .{} }) catch {};
+                return Error.ConnectionClosed;
+            }
+            return .{
+                .channel = f.channel,
+                .method = m,
+            };
+        }
     }
 
     pub fn stopHeartbeat(self: *Connection) void {
@@ -316,13 +324,9 @@ pub const Connection = struct {
     fn heartbeatWorker(self: *Connection, interval_sec: u16) void {
         const total_steps = @as(u32, interval_sec) * 4;
         var counter: u32 = 0;
-        const req = std.os.linux.timespec{
-            .sec = 0,
-            .nsec = 250 * 1000_000,
-        };
 
         while (!self.heartbeat_stop.load(.acquire)) {
-            _ = std.os.linux.nanosleep(&req, null);
+            self.io.sleep(.fromMilliseconds(250), .awake) catch break;
             counter += 1;
             if (counter >= total_steps) {
                 counter = 0;
@@ -351,13 +355,17 @@ pub const Connection = struct {
         };
         self.sendMethod(0, close_m) catch {};
 
-        // Await Connection.CloseOk
+        // Await Connection.CloseOk, skipping heartbeats
         var payload_buf: [512]u8 = undefined;
-        if (self.transport.?.readFrame(&payload_buf)) |f| {
-            if (f.frame_type == .method and f.channel == 0) {
-                _ = method.decodeMethod(f.payload) catch {};
-            }
-        } else |_| {}
+        while (true) {
+            if (self.transport.?.readFrame(&payload_buf)) |f| {
+                if (f.frame_type == .heartbeat) continue;
+                if (f.frame_type == .method and f.channel == 0) {
+                    _ = method.decodeMethod(f.payload) catch {};
+                }
+                break;
+            } else |_| break;
+        }
 
         self.transport.?.close();
         self.transport = null;

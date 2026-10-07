@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     const payload = "{\"event\": \"task_created\", \"timestamp\": 1727584000}";
     try ch.publish("", "example.queue", payload, .{
         .content_type = "application/json",
-        .delivery_mode = @intFromEnum(amqp.properties.DeliveryMode.persistent),
+        .delivery_mode = @backingInt(amqp.properties.DeliveryMode.persistent),
         .message_id = "msg-001",
     }, false);
 

@@ -211,6 +211,16 @@ pub const TopologyTracker = struct {
             };
             try ch.consume(sub.queue, sub.consumer_tag, sub.no_ack);
         }
+
+        // 5. Restore Confirms
+        var confirms_iter = self.confirms_channels.keyIterator();
+        while (confirms_iter.next()) |ch_id| {
+            var ch = conn.openChannel(ch_id.*) catch |err| {
+                if (err == error.BrokerError) continue;
+                return err;
+            };
+            try ch.enableConfirms();
+        }
     }
 };
 

@@ -154,10 +154,20 @@ pub const Transport = struct {
     }
 
     pub fn close(self: *Transport) void {
-        self.stream.close(self.io);
-        self.allocator.free(self.read_buf);
-        self.allocator.free(self.write_buf);
-        if (self.tls_read_buf) |b| self.allocator.free(b);
-        if (self.tls_write_buf) |b| self.allocator.free(b);
+        if (self.read_buf.len > 0) {
+            self.stream.close(self.io);
+            self.allocator.free(self.read_buf);
+            self.read_buf = &.{};
+            self.allocator.free(self.write_buf);
+            self.write_buf = &.{};
+            if (self.tls_read_buf) |b| {
+                self.allocator.free(b);
+                self.tls_read_buf = null;
+            }
+            if (self.tls_write_buf) |b| {
+                self.allocator.free(b);
+                self.tls_write_buf = null;
+            }
+        }
     }
 };

@@ -19,6 +19,7 @@ pub const Client = struct {
     connection: connection_mod.Connection,
     topology: recovery_mod.TopologyTracker,
     reconnect_state: recovery_mod.ReconnectState,
+    uri_arena: ?std.heap.ArenaAllocator = null,
 
     pub fn init(allocator: std.mem.Allocator, io: Io, config: Config) Client {
         return .{
@@ -33,13 +34,21 @@ pub const Client = struct {
 
     /// Initializes a client by parsing an AMQP connection URI (e.g. "amqp://guest:guest@localhost:5672/").
     pub fn initUri(allocator: std.mem.Allocator, io: Io, uri: []const u8) !Client {
-        const config = try Config.fromUri(allocator, uri);
-        return Client.init(allocator, io, config);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const config = try Config.fromUri(arena.allocator(), uri);
+        var c = Client.init(allocator, io, config);
+        c.uri_arena = arena;
+        return c;
     }
 
     pub fn deinit(self: *Client) void {
         self.connection.deinit();
         self.topology.deinit();
+        if (self.uri_arena) |*arena| {
+            arena.deinit();
+            self.uri_arena = null;
+        }
     }
 
     /// Establishes the connection and runs the AMQP 0-9-1 handshake.
@@ -51,6 +60,7 @@ pub const Client = struct {
     /// Reconnects to the broker using exponential backoff and transparently restores all declared topology.
     pub fn reconnect(self: *Client) !void {
         self.connection.deinit();
+        self.reconnect_state.reset();
 
         while (self.reconnect_state.nextDelayMs()) |delay_ms| {
             // Sleep for backoff interval
@@ -113,10 +123,7 @@ test "client connect, channel, publish, and clean shutdown" {
 }
 
 test "client initUri against live rabbitmq" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var client = try Client.initUri(arena.allocator(), std.testing.io, "amqp://guest:guest@127.0.0.1:5674/%2F");
+    var client = try Client.initUri(std.testing.allocator, std.testing.io, "amqp://guest:guest@127.0.0.1:5674/%2F");
     defer client.deinit();
 
     client.connect() catch |err| {

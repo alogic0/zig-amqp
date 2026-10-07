@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
 
     try ch.publishConfirm("", "example.confirms_queue", payload, .{
         .content_type = "application/json",
-        .delivery_mode = @intFromEnum(amqp.properties.DeliveryMode.persistent),
+        .delivery_mode = @backingInt(amqp.properties.DeliveryMode.persistent),
     }, false);
 
     std.debug.print("Broker confirmed delivery tag {d}!\n", .{ch.last_acked_seq});
